@@ -960,6 +960,131 @@ Response-nya **objek yang sama persis** dengan response `POST /api/transactions`
 buat transaksi `SELL`, `SELL_SUPPLIER`, maupun `BUY`. `{id}` tidak ditemukan → 404
 (`"transaksi tidak ditemukan"`); bukan format UUID → 400.
 
+### /api/purchase-orders — order stok ke supplier (BE-901/BE-902/BE-903/BE-904, ADMIN & SUPER_ADMIN)
+
+```bash
+POST /api/purchase-orders            # { supplier_id, notes?, items[]:{product_id,quantity,purchase_price} } -> 201
+GET  /api/purchase-orders            # ?status=&page=&limit=                                                  -> 200
+GET  /api/purchase-orders/{id}       # header + items                                                          -> 200 / 404
+POST /api/purchase-orders/{id}/receive  # { items[]:{product_id,serials[],condition} }                         -> 200 / 404 / 409
+POST /api/purchase-orders/{id}/cancel   # tanpa body                                                            -> 200 / 404 / 409
+```
+
+Beda dari `/api/products`/`/api/stock-items`: modul ini **cuma** `ADMIN`/`SUPER_ADMIN` — tidak ada
+akses `KASIR` sama sekali (PO murni urusan procurement/back-office, semua ticket-nya eksplisit
+"Sebagai Admin", beda dari `/api/products` yang butuh diakses kasir buat jualan).
+
+**Alur**: `POST` bikin PO dengan `status=BELUM_DITERIMA` — **belum** ada `stock_items` yang
+dibuat sama sekali di titik ini (barang masih "dalam perjalanan", modal sudah keluar tapi stok
+belum siap jual). `total_amount` dihitung server (`Σ quantity × purchase_price`), tidak dipercaya
+dari input klien. `po_code` format `PO-YYYYMMDD-XXXX` (urut 4 digit per hari), pola generate yang
+sama dengan `sku`/`barcode`/`transaction_code` (hitung + insert 1 transaksi DB, retry kalau race).
+
+`POST /{id}/receive` adalah titik barang beneran jadi stok: **satu kali tembak, harus mencakup
+semua produk di PO itu** — request `items[]` wajib punya persis produk yang sama dengan item-item
+PO, dan `len(serials)` tiap produk harus **persis sama** dengan `quantity` PO-nya (kurang maupun
+lebih sama-sama ditolak 400, bukan cuma kasus kurang). Untuk tiap serial: satu `stock_items` baru
+(`status=AVAILABLE`, `barcode` auto-generate pola `{SKU}-{urut 4 digit}` sama seperti
+BE-501/BE-801, `purchase_price` diambil dari PO — **bukan** dari request receive,
+`po_id`/`supplier_id` ikut terisi di unit itu — pertama kalinya kedua kolom ini kepakai, sebelumnya
+selalu `NULL` baik dari create-stock-item langsung (BE-501) maupun buyback (BE-801)). Semuanya
+atomik dalam satu transaksi DB, PO row di-lock (`FOR UPDATE`) selama itu supaya PO yang sama tidak
+bisa diterima dua kali secara konkuren; setelah semua unit masuk, PO jadi `status=DITERIMA` +
+`received_at` terisi. PO yang sudah `DITERIMA`/`DIBATALKAN` tidak bisa di-receive lagi → 409.
+
+`POST /{id}/cancel` cuma bisa dari `status=BELUM_DITERIMA` → `DIBATALKAN` (guard di level SQL,
+pola yang sama dengan hard-delete `stock_items` di BE-504); PO yang sudah `DITERIMA` atau
+`DIBATALKAN` → 409.
+
+**Validasi**: field item `POST` (`product_id`/`quantity`/`purchase_price`) pakai tier `400` (di
+titik ini belum ada `stock_items` yang dibuat, jadi bukan tier validasi "unit fisik"). Field item
+`receive` (`serial_number`/`condition`) pakai tier `422`, sama seperti BE-501/BE-801 — langkah ini
+memang bikin `stock_items` baru. `serial_number` duplikat (lawan unit yang sudah ada, atau sesama
+item dalam satu batch receive) → `409`, pakai constraint & sentinel yang sama dengan BE-801
+(`uq_stock_items_serial_number`). Produk harus aktif buat `POST` maupun `receive` (400 kalau
+diarsipkan, pesan sama dengan BE-501); tidak ada pengecekan aktif buat supplier (konsisten dengan
+`SELL_SUPPLIER` di BE-702 yang juga tidak mengeceknya).
+
+Response `GET /` (list) cuma header (tanpa `items[]`); `GET /{id}` dan `POST` sertakan `items[]`
+(dengan nama & SKU produk, di-join langsung — `purchase_order_items` tidak punya kolom snapshot
+nama produk seperti `transaction_items`, jadi live join memang satu-satunya cara). Response
+`receive` juga sertakan `received_units[]` (`stock_item_id`/`barcode`/`product_name`/`serial_number`
+per unit baru) — biar admin yang baru nerima PO langsung punya barcode buat cetak label, sama
+alasannya dengan `stock_item_id`/`barcode` di tiap item transaksi (BE-702/BE-801).
+
+Contoh response `POST /api/purchase-orders` (201):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "5e6f7081-9203-4415-ef01-234567890123",
+    "po_code": "PO-20260731-0001",
+    "supplier": { "id": "5c9e1a3b-8f2d-4a6e-9b1c-7d8e9f0a1b2c", "name": "Toko Emas Jaya" },
+    "total_amount": 2400000,
+    "status": "BELUM_DITERIMA",
+    "notes": "",
+    "items": [
+      {
+        "id": "6f708192-0334-5526-f012-345678901234",
+        "product": { "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f", "name": "Emas Batangan 10gr" },
+        "quantity": 3,
+        "purchase_price": 800000
+      }
+    ],
+    "created_at": "2026-07-31T09:00:00Z",
+    "received_at": null
+  }
+}
+```
+
+Contoh response `POST /api/purchase-orders/{id}/receive` (200) — `status`/`received_at` berubah,
+`received_units[]` muncul:
+```json
+{
+  "success": true,
+  "data": {
+    "id": "5e6f7081-9203-4415-ef01-234567890123",
+    "po_code": "PO-20260731-0001",
+    "supplier": { "id": "5c9e1a3b-8f2d-4a6e-9b1c-7d8e9f0a1b2c", "name": "Toko Emas Jaya" },
+    "total_amount": 2400000,
+    "status": "DITERIMA",
+    "notes": "",
+    "items": [ { "...": "sama seperti response POST" } ],
+    "received_units": [
+      {
+        "stock_item_id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
+        "barcode": "BAT-ANT-10-001-0001",
+        "product_name": "Emas Batangan 10gr",
+        "serial_number": "PO-SN-1"
+      }
+    ],
+    "created_at": "2026-07-31T09:00:00Z",
+    "received_at": "2026-07-31T10:00:00Z"
+  }
+}
+```
+
+Contoh response error:
+```json
+// 403 — role selain ADMIN/SUPER_ADMIN
+{"success":false,"error":{"code":"FORBIDDEN","message":"Anda tidak memiliki akses untuk aksi ini"}}
+
+// 400 — POST, field item tidak valid
+{"success":false,"error":{"code":"BAD_REQUEST","message":"quantity setiap item harus lebih besar dari 0"}}
+
+// 400 — receive, items tidak mencakup persis semua produk PO / jumlah serial tidak sama dengan quantity
+{"success":false,"error":{"code":"BAD_REQUEST","message":"items harus mencakup semua produk di PO ini, tidak kurang tidak lebih"}}
+
+// 422 — receive, serial_number/condition kosong atau invalid
+{"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"serial_number wajib diisi di setiap unit"}}
+
+// 404 — {id}/supplier_id/product_id tidak ditemukan
+{"success":false,"error":{"code":"NOT_FOUND","message":"purchase order tidak ditemukan"}}
+
+// 409 — receive PO yang sudah DITERIMA/DIBATALKAN, atau cancel PO yang sudah DITERIMA/DIBATALKAN
+{"success":false,"error":{"code":"CONFLICT","message":"PO sudah diterima atau dibatalkan, tidak bisa diterima lagi"}}
+```
+
 ## Middleware JWT & role (internal/middleware/auth.go)
 
 - `appmw.JWTAuth(authService)` — verifikasi Bearer token (signature, expiry, dan status
@@ -1192,6 +1317,30 @@ Dua lapis test:
 - `GET /api/transactions/{id}` (BE-602): detail lengkap dengan `items[]` (`stock_item_id`/`barcode`
   ikut kebawa) sama persis kayak response `POST`, berlaku buat `SELL` maupun `BUY`, tanpa `cogs`;
   tidak ditemukan → 404; format id bukan UUID → 400
+
+**`purchase_orders_test.go`** — `/api/purchase-orders` (BE-901/BE-902/BE-903/BE-904)
+- Semua route tanpa token → 401; role KASIR → 403 di semua endpoint (beda dari
+  `/api/products`/`/api/stock-items` yang GET-nya kebuka buat KASIR — di sini nggak sama sekali)
+- `POST` create → 201, `po_code` format `PO-YYYYMMDD-0001`, `total_amount` terjumlah benar
+  (`Σ quantity×purchase_price`), `status=BELUM_DITERIMA`; **belum ada** `stock_items` yang dibuat
+  (dicek lewat `GET /api/products/{productId}/stock-items`, masih kosong)
+- Dua PO di hari yang sama → `po_code` urut naik (`-0001`, `-0002`)
+- `supplier_id`/`items` kosong → 400; `quantity`/`purchase_price` invalid → 400; supplier/produk
+  tidak ditemukan → 404; produk diarsipkan → 400
+- `GET` list: `?status=` filter dengan benar; `?limit=&page=` paginasi
+- `GET` detail: `items[]` bawa nama & SKU produk (di-join), `supplier` bawa nama; tidak ditemukan
+  → 404; format id bukan UUID → 400
+- `POST /{id}/receive`: full receive (mencakup semua produk PO, jumlah serial pas dengan quantity)
+  → 200, `received_units[]` kasih `stock_item_id`/`barcode` tiap unit baru (dicek lewat
+  `GET /api/stock-items/{id}`: `status=AVAILABLE`, `purchase_price` sama dengan PO item,
+  `po_id`/`supplier_id` terisi — dicek langsung ke `testPool` karena belum ada field itu di
+  response stock-item manapun), PO jadi `status=DITERIMA` + `received_at` terisi
+- `receive` dengan jumlah `serials` tidak sama dengan `quantity` PO → 400; request yang tidak
+  mencakup semua produk PO → 400; `serial_number` kosong → 422; `condition` invalid → 422;
+  `serial_number` sama antar item dalam satu batch → 409; PO yang sudah `DITERIMA` di-receive
+  lagi → 409; `{id}` tidak ditemukan → 404
+- `POST /{id}/cancel`: PO `BELUM_DITERIMA` → 200, `status=DIBATALKAN`; PO yang sudah `DITERIMA`
+  atau sudah `DIBATALKAN` → 409; tidak ditemukan → 404
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta

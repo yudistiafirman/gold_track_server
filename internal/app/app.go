@@ -69,7 +69,11 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	transactionService := service.NewTransactionService(transactionRepo, stockItemRepo, productRepo, customerRepo, supplierRepo, userRepo)
 	transactionHandler := handler.NewTransactionHandler(transactionService)
 
-	router := handler.NewRouter(log, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler, transactionHandler)
+	purchaseOrderRepo := repository.NewPurchaseOrderRepository(dbPool)
+	purchaseOrderService := service.NewPurchaseOrderService(purchaseOrderRepo, productRepo, supplierRepo, userRepo)
+	purchaseOrderHandler := handler.NewPurchaseOrderHandler(purchaseOrderService)
+
+	router := handler.NewRouter(log, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler, transactionHandler, purchaseOrderHandler)
 
 	return &App{Pool: dbPool, Router: router}, nil
 }
