@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -49,6 +50,22 @@ func (d DatabaseConfig) DSN() string {
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		d.Host, d.Port, d.User, d.Password, d.Name, d.SSLMode,
 	)
+}
+
+// MigrateDSN builds a golang-migrate pgx5:// URL from the database config.
+// Used by cmd/migrate and by the e2e test harness (both need the same
+// connection string shape golang-migrate expects, distinct from DSN()).
+func (d DatabaseConfig) MigrateDSN() string {
+	u := url.URL{
+		Scheme: "pgx5",
+		User:   url.UserPassword(d.User, d.Password),
+		Host:   fmt.Sprintf("%s:%s", d.Host, d.Port),
+		Path:   "/" + d.Name,
+	}
+	q := u.Query()
+	q.Set("sslmode", d.SSLMode)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // Load reads configuration from environment variables. A .env file is loaded

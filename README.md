@@ -176,6 +176,70 @@ login. `POST /api/auth/logout` sudah jadi contoh nyata endpoint terproteksi (per
 role bebas). Endpoint bisnis lain (products, stock, dst.) akan dipasangi middleware yang sama
 saat dibuat di ticket berikutnya.
 
+## Testing
+
+Dua lapis test:
+
+- **Unit test** (`internal/**/*_test.go`, mis. `internal/middleware/auth_test.go`) — cepat, tanpa
+  dependency eksternal (DB di-mock/di-skip). Jalankan:
+  ```bash
+  go test ./internal/...
+  ```
+
+- **E2E test** (`test/e2e/`) — jalanin router chi asli (`internal/app.New()`) di atas
+  `httptest.Server`, lawan Postgres beneran (bukan mock), nembak tiap endpoint lewat HTTP
+  sungguhan dari `handler` → `service` → `repository` → DB. Ini test suite yang jadi bukti
+  wiring `internal/app` benar-benar nyambung ujung ke ujung.
+
+  ```bash
+  docker compose up -d postgres   # DB lokal, pastikan jalan dulu
+  go test ./test/e2e/...
+  go test ./test/e2e/... -v       # verbose, lihat nama tiap test
+  go test ./test/e2e/... -run TestUsers_CreateListGetUpdateDelete -v   # satu test spesifik
+  ```
+
+  Database test (`gold_track_test` secara default, lihat `TestMain` di `test/e2e/main_test.go`)
+  dibuat otomatis kalau belum ada dan di-migrate otomatis setiap run — tidak perlu setup manual
+  selain `docker compose up -d postgres`. Tiap test top-level mulai dari `resetDB(t)`
+  (`TRUNCATE ... RESTART IDENTITY CASCADE`) supaya independen dari urutan run.
+
+  Ganti target DB test lewat env `DB_NAME` (default `gold_track_test`) kalau perlu isolasi dari
+  DB development (`gold_track`).
+
+### Skenario yang di-cover
+
+**`health_test.go`**
+- `GET /health` → 200 `success:true`
+
+**`auth_test.go`** — `POST /api/auth/login`, `POST /api/auth/logout`
+- Login sukses → token JWT non-kosong + data user benar
+- Login password salah / email tidak ada / user nonaktif → 401 dengan pesan generik yang sama
+  (tidak membocorkan status akun)
+- Login field kosong → 400
+- Login tidak butuh token (endpoint publik)
+- Logout dengan token valid → 200
+- Logout tanpa token → 401
+- Logout dua kali pakai token yang sama → request kedua 401 (membuktikan blacklist `jti` jalan)
+
+**`users_test.go`** — `/api/users` (CRUD, SUPER_ADMIN saja)
+- Semua route `/api/users/*` tanpa token → 401
+- Role selain SUPER_ADMIN (mis. KASIR) → 403
+- Alur penuh create → list → get → update → delete:
+  - create 201, response tidak pernah mengandung field `password`/`password_hash`
+  - user baru muncul di list
+  - get by `public_id` (UUID) mengembalikan data yang benar
+  - update mengubah field (nama, role, dll)
+  - delete = soft delete (`is_active=false`); user yang dinonaktifkan gagal login (401)
+- Create dengan email duplikat → 409
+- Get dengan id bukan UUID (mis. `/api/users/1`) → 400, dicegah sebelum sempat query DB
+- Get id UUID valid tapi tidak ada → 404
+- SUPER_ADMIN tidak bisa menonaktifkan akun sendiri lewat `DELETE` → 400 (guard anti-lockout)
+
+Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
+(ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta
+lengkap API surface, bukan cuma cover apa yang ada waktu ditulis (lihat komentar package di
+`test/e2e/main_test.go`).
+
 ## Konfigurasi (env)
 
 Lihat `.env.example` untuk daftar lengkap. Semua diambil dari environment

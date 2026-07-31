@@ -9,12 +9,9 @@ import (
 	"syscall"
 	"time"
 
+	"gold-track-be/internal/app"
 	"gold-track-be/internal/config"
-	"gold-track-be/internal/database"
-	"gold-track-be/internal/handler"
 	"gold-track-be/internal/logger"
-	"gold-track-be/internal/repository"
-	"gold-track-be/internal/service"
 )
 
 func main() {
@@ -28,31 +25,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	dbPool, err := database.NewPostgresPool(ctx, cfg.Database)
+	application, err := app.New(ctx, cfg, log)
 	if err != nil {
-		log.Error("failed to connect to database", "error", err)
+		log.Error("failed to initialize app", "error", err)
 		os.Exit(1)
 	}
-	defer dbPool.Close()
+	defer application.Pool.Close()
 	log.Info("connected to postgres", "host", cfg.Database.Host, "db", cfg.Database.Name)
-
-	healthRepo := repository.NewHealthRepository(dbPool)
-	healthService := service.NewHealthService(healthRepo)
-	healthHandler := handler.NewHealthHandler(healthService)
-
-	userRepo := repository.NewUserRepository(dbPool)
-	tokenBlacklistRepo := repository.NewTokenBlacklistRepository(dbPool)
-	authService := service.NewAuthService(userRepo, tokenBlacklistRepo, cfg.JWT.Secret, cfg.JWT.Expiry)
-	authHandler := handler.NewAuthHandler(authService)
-
-	userService := service.NewUserService(userRepo)
-	userHandler := handler.NewUserHandler(userService)
-
-	router := handler.NewRouter(log, healthHandler, authHandler, authService, userHandler)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.App.Port,
-		Handler:      router,
+		Handler:      application.Router,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,

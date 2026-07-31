@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"strconv"
 
@@ -29,7 +28,7 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	m, err := migrate.New(migrationsPath, migrateDSN(cfg.Database))
+	m, err := migrate.New(migrationsPath, cfg.Database.MigrateDSN())
 	if err != nil {
 		log.Fatalf("init migrate: %v", err)
 	}
@@ -89,17 +88,4 @@ func run(m *migrate.Migrate, cmd string, args []string) error {
 
 func usage() {
 	fmt.Println("usage: migrate <up|down [n]|steps <n>|version|force <version>>")
-}
-
-func migrateDSN(db config.DatabaseConfig) string {
-	u := url.URL{
-		Scheme: "pgx5",
-		User:   url.UserPassword(db.User, db.Password),
-		Host:   fmt.Sprintf("%s:%s", db.Host, db.Port),
-		Path:   "/" + db.Name,
-	}
-	q := u.Query()
-	q.Set("sslmode", db.SSLMode)
-	u.RawQuery = q.Encode()
-	return u.String()
 }
