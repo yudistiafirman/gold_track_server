@@ -28,6 +28,7 @@ type transactionSummaryDTO struct {
 	TotalAmount     float64 `json:"total_amount"`
 	TotalWeight     float64 `json:"total_weight"`
 	PaymentMethod   string  `json:"payment_method"`
+	PaymentRef      string  `json:"payment_ref"`
 	Status          string  `json:"status"`
 }
 
@@ -43,6 +44,7 @@ type transactionDTO struct {
 	TotalAmount     float64              `json:"total_amount"`
 	TotalWeight     float64              `json:"total_weight"`
 	PaymentMethod   string               `json:"payment_method"`
+	PaymentRef      string               `json:"payment_ref"`
 	Status          string               `json:"status"`
 	Items           []transactionItemDTO `json:"items"`
 }
@@ -858,6 +860,72 @@ func TestTransactions_GetDetailWorksForBuyToo(t *testing.T) {
 	decodeData(t, resp, &fetched)
 	if fetched.Type != "BUY" || len(fetched.Items) != 1 {
 		t.Fatalf("expected BUY detail with 1 item, got %+v", fetched)
+	}
+}
+
+func TestTransactions_PaymentRefRoundTripsThroughCreateGetAndHistory(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", map[string]any{
+		"type":           "SELL",
+		"customer_id":    customer.ID,
+		"payment_method": "TRANSFER",
+		"payment_ref":    "BCA - 88812345",
+		"items":          []map[string]any{{"stock_item_id": stockItem.ID, "price_total": 1500000}},
+	}, adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var created transactionDTO
+	decodeData(t, resp, &created)
+	if created.PaymentRef != "BCA - 88812345" {
+		t.Fatalf("create: expected payment_ref echoed back, got %q", created.PaymentRef)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/transactions/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched transactionDTO
+	decodeData(t, resp, &fetched)
+	if fetched.PaymentRef != "BCA - 88812345" {
+		t.Fatalf("get: expected payment_ref persisted, got %q", fetched.PaymentRef)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/customers/"+customer.ID+"/transactions", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("history: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var history transactionListDTO
+	decodeData(t, resp, &history)
+	if len(history.Items) != 1 || history.Items[0].PaymentRef != "BCA - 88812345" {
+		t.Fatalf("history: expected payment_ref surfaced in customer history, got %+v", history.Items)
+	}
+}
+
+func TestTransactions_PaymentRefEmptyForCash(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var created transactionDTO
+	decodeData(t, resp, &created)
+	if created.PaymentRef != "" {
+		t.Fatalf("expected empty payment_ref when not supplied (CASH), got %q", created.PaymentRef)
 	}
 }
 

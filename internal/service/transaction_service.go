@@ -49,6 +49,7 @@ type TransactionSummary struct {
 	TotalAmount     float64
 	TotalWeight     float64
 	PaymentMethod   string
+	PaymentRef      string // reference/identifier for non-cash payments (e.g. transfer ref, e-wallet name) — empty for CASH
 	Status          string
 	Items           []TransactionItemSummary
 	CreatedAt       time.Time
@@ -283,6 +284,7 @@ func (s *transactionService) CreateSale(ctx context.Context, input CreateSaleInp
 		TotalAmount:     transaction.TotalAmount,
 		TotalWeight:     transaction.TotalWeight,
 		PaymentMethod:   transaction.PaymentMethod,
+		PaymentRef:      stringOrEmpty(transaction.PaymentRef),
 		Status:          transaction.Status,
 		Items:           itemSummaries,
 		CreatedAt:       transaction.CreatedAt,
@@ -391,6 +393,7 @@ func (s *transactionService) CreateBuy(ctx context.Context, input CreateBuyInput
 		TotalAmount:     transaction.TotalAmount,
 		TotalWeight:     transaction.TotalWeight,
 		PaymentMethod:   transaction.PaymentMethod,
+		PaymentRef:      stringOrEmpty(transaction.PaymentRef),
 		Status:          transaction.Status,
 		Items:           itemSummaries,
 		CreatedAt:       transaction.CreatedAt,
@@ -436,6 +439,7 @@ func (s *transactionService) ListByCustomer(ctx context.Context, input ListCusto
 			TotalAmount:     t.TotalAmount,
 			TotalWeight:     t.TotalWeight,
 			PaymentMethod:   t.PaymentMethod,
+			PaymentRef:      stringOrEmpty(t.PaymentRef),
 			Status:          t.Status,
 			CreatedAt:       t.CreatedAt,
 			CompletedAt:     t.CompletedAt,
@@ -480,6 +484,7 @@ func (s *transactionService) Get(ctx context.Context, publicID string) (Transact
 		TotalAmount:     transaction.TotalAmount,
 		TotalWeight:     transaction.TotalWeight,
 		PaymentMethod:   transaction.PaymentMethod,
+		PaymentRef:      stringOrEmpty(transaction.PaymentRef),
 		Status:          transaction.Status,
 		Items:           itemSummaries,
 		CreatedAt:       transaction.CreatedAt,
@@ -558,6 +563,7 @@ func (s *transactionService) GetReceipt(ctx context.Context, publicID string) (R
 			TotalAmount:     transaction.TotalAmount,
 			TotalWeight:     transaction.TotalWeight,
 			PaymentMethod:   transaction.PaymentMethod,
+			PaymentRef:      stringOrEmpty(transaction.PaymentRef),
 			Status:          transaction.Status,
 			Items:           itemSummaries,
 			CreatedAt:       transaction.CreatedAt,

@@ -40,6 +40,7 @@ type transactionResponse struct {
 	TotalAmount     float64                   `json:"total_amount"`
 	TotalWeight     float64                   `json:"total_weight"`
 	PaymentMethod   string                    `json:"payment_method"`
+	PaymentRef      string                    `json:"payment_ref"`
 	Status          string                    `json:"status"`
 	Items           []transactionItemResponse `json:"items"`
 	CreatedAt       time.Time                 `json:"created_at"`
@@ -66,6 +67,7 @@ func toTransactionResponse(t service.TransactionSummary) transactionResponse {
 		TotalAmount:     t.TotalAmount,
 		TotalWeight:     t.TotalWeight,
 		PaymentMethod:   t.PaymentMethod,
+		PaymentRef:      t.PaymentRef,
 		Status:          t.Status,
 		Items:           items,
 		CreatedAt:       t.CreatedAt,
@@ -164,6 +166,7 @@ type transactionSummaryResponse struct {
 	TotalAmount     float64    `json:"total_amount"`
 	TotalWeight     float64    `json:"total_weight"`
 	PaymentMethod   string     `json:"payment_method"`
+	PaymentRef      string     `json:"payment_ref"`
 	Status          string     `json:"status"`
 	CreatedAt       time.Time  `json:"created_at"`
 	CompletedAt     *time.Time `json:"completed_at"`
@@ -177,6 +180,7 @@ func toTransactionSummaryResponse(t service.TransactionSummary) transactionSumma
 		TotalAmount:     t.TotalAmount,
 		TotalWeight:     t.TotalWeight,
 		PaymentMethod:   t.PaymentMethod,
+		PaymentRef:      t.PaymentRef,
 		Status:          t.Status,
 		CreatedAt:       t.CreatedAt,
 		CompletedAt:     t.CompletedAt,

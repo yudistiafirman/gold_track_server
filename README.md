@@ -904,6 +904,12 @@ baru dibuat (langsung kepakai buat cetak label via `GET /api/stock-items/{id}/la
 **tidak pernah menyertakan `cogs`** (harga pokok/beli unit) — itu data margin toko, sengaja
 tidak diekspos ke response checkout yang kemungkinan dilihat kasir.
 
+`payment_ref` adalah identifier bebas buat pembayaran non-tunai (nomor referensi transfer, nama
+e-wallet, dll — bukan enum tetap, `payment_method` sendiri yang sudah membedakan `CASH`/
+`TRANSFER`/`QRIS`). Selalu ikut kebalikin di response — di sini, di `GET /api/transactions/{id}`,
+maupun di `GET /api/customers/{id}/transactions` (riwayat) — kosong (`""`) kalau tidak diisi
+(lazimnya buat `CASH`).
+
 Contoh response `SELL` (201):
 ```json
 {
@@ -914,7 +920,8 @@ Contoh response `SELL` (201):
     "type": "SELL",
     "total_amount": 1500000,
     "total_weight": 10,
-    "payment_method": "CASH",
+    "payment_method": "TRANSFER",
+    "payment_ref": "BCA - 88812345",
     "status": "COMPLETED",
     "items": [
       {
@@ -944,6 +951,7 @@ Contoh response `BUY` (201) — unit barunya langsung `AVAILABLE`:
     "total_amount": 900000,
     "total_weight": 10,
     "payment_method": "CASH",
+    "payment_ref": "",
     "status": "COMPLETED",
     "items": [
       {
@@ -1647,6 +1655,9 @@ Dua lapis test:
 - `GET /api/transactions/{id}` (BE-602): detail lengkap dengan `items[]` (`stock_item_id`/`barcode`
   ikut kebawa) sama persis kayak response `POST`, berlaku buat `SELL` maupun `BUY`, tanpa `cogs`;
   tidak ditemukan → 404; format id bukan UUID → 400
+- `payment_ref` round-trip: diisi saat create (mis. non-tunai) → ikut kebalikin persis sama di
+  response create, `GET /api/transactions/{id}`, **dan** `GET /api/customers/{id}/transactions`
+  (riwayat); tidak diisi (lazimnya `CASH`) → `""` di semua response, bukan `null` atau hilang
 
 **`purchase_orders_test.go`** — `/api/purchase-orders` (BE-901/BE-902/BE-903/BE-904)
 - Semua route tanpa token → 401; role KASIR → 403 di semua endpoint (beda dari
