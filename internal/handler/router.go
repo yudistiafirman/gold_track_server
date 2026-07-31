@@ -27,6 +27,9 @@ func NewRouter(
 	categoryHandler *CategoryHandler,
 	brandHandler *BrandHandler,
 	productHandler *ProductHandler,
+	supplierHandler *SupplierHandler,
+	stockItemHandler *StockItemHandler,
+	customerHandler *CustomerHandler,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -46,6 +49,14 @@ func NewRouter(
 
 			r.Get("/products", productHandler.List)
 			r.Get("/products/{id}", productHandler.Get)
+			r.Get("/products/{productId}/stock-items", stockItemHandler.ListByProduct)
+			r.Get("/stock-items/{id}", stockItemHandler.Get)
+			r.Get("/stock-items/{id}/label", stockItemHandler.GetLabel)
+			r.Route("/customers", func(r chi.Router) {
+				r.Get("/", customerHandler.List)
+				r.Post("/", customerHandler.Create)
+				r.Get("/{id}", customerHandler.Get)
+			})
 
 			r.Group(func(r chi.Router) {
 				r.Use(appmw.RequireRole("SUPER_ADMIN"))
@@ -77,6 +88,18 @@ func NewRouter(
 				r.Post("/products", productHandler.Create)
 				r.Put("/products/{id}", productHandler.Update)
 				r.Delete("/products/{id}", productHandler.Delete)
+				r.Post("/products/{productId}/stock-items", stockItemHandler.Create)
+				r.Put("/stock-items/{id}", stockItemHandler.Update)
+				r.Delete("/stock-items/{id}", stockItemHandler.Delete)
+				r.Route("/suppliers", func(r chi.Router) {
+					r.Get("/", supplierHandler.List)
+					r.Post("/", supplierHandler.Create)
+					r.Get("/{id}", supplierHandler.Get)
+					r.Put("/{id}", supplierHandler.Update)
+					r.Delete("/{id}", supplierHandler.Delete)
+				})
+				r.Put("/customers/{id}", customerHandler.Update)
+				r.Delete("/customers/{id}", customerHandler.Delete)
 			})
 		})
 	})

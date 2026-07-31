@@ -53,7 +53,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	productService := service.NewProductService(productRepo, categoryRepo, brandRepo, userRepo)
 	productHandler := handler.NewProductHandler(productService)
 
-	router := handler.NewRouter(log, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler)
+	supplierRepo := repository.NewSupplierRepository(dbPool)
+	supplierService := service.NewSupplierService(supplierRepo)
+	supplierHandler := handler.NewSupplierHandler(supplierService)
+
+	stockItemRepo := repository.NewStockItemRepository(dbPool)
+	stockItemService := service.NewStockItemService(stockItemRepo, productRepo, userRepo)
+	stockItemHandler := handler.NewStockItemHandler(stockItemService)
+
+	customerRepo := repository.NewCustomerRepository(dbPool)
+	customerService := service.NewCustomerService(customerRepo)
+	customerHandler := handler.NewCustomerHandler(customerService)
+
+	router := handler.NewRouter(log, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler)
 
 	return &App{Pool: dbPool, Router: router}, nil
 }

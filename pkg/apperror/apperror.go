@@ -59,6 +59,10 @@ func Conflict(message string, err error) *AppError {
 	return New(http.StatusConflict, "CONFLICT", message, err)
 }
 
+func UnprocessableEntity(message string, err error) *AppError {
+	return New(http.StatusUnprocessableEntity, "UNPROCESSABLE_ENTITY", message, err)
+}
+
 // As extracts an *AppError from err, wrapping it as an internal error if it isn't one.
 func As(err error) *AppError {
 	var appErr *AppError

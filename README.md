@@ -71,6 +71,8 @@ Urutan file (`000001`…`000016`) mengikuti dependency FK: `users` → `supplier
 `expenses` → `settings` → `stock_opnames` → `stock_opname_items` → `token_blacklist`.
 `000017` (`categories`) dan `000018` (`brands`) berdiri sendiri, lalu `000019` meng-ALTER
 `products` supaya `category_id`/`brand_id` FK ke keduanya (ganti kolom `category`/`brand` lama).
+`000020` meng-ALTER `customers` nambah kolom `is_active` (tabel aslinya di `000001`…`000016`
+belum punya, beda dari resource lain yang dari awal sudah punya).
 
 Menambah migrasi baru: buat pasangan file
 `migrations/{next_number}_{deskripsi}.up.sql` dan `.down.sql`.
@@ -466,6 +468,222 @@ sama persis dengan `POST` untuk validasi field/kategori/brand):
 {"success":false,"error":{"code":"BAD_REQUEST","message":"id tidak valid"}}
 ```
 
+### /api/suppliers — CRUD supplier (ADMIN & SUPER_ADMIN)
+
+```bash
+GET    /api/suppliers        # ?search=&page=&limit= -> 200
+POST   /api/suppliers        # { name, phone?, address?, notes? }          -> 201
+GET    /api/suppliers/{id}   # detail supplier                              -> 200 / 404
+PUT    /api/suppliers/{id}   # { name, phone?, address?, notes?, is_active } -> 200 / 404
+DELETE /api/suppliers/{id}   # soft delete (is_active=false)                -> 200 / 404
+```
+
+`{id}` adalah `public_id` (UUID). Cuma `name` yang wajib — `phone`/`address`/`notes` opsional,
+dikosongkan (`""`) di request berarti `NULL` di DB. `PUT` full-replace seperti resource lain
+(kirim semua field yang bisa diedit, bukan partial patch).
+
+Beda dari `/api/products` (BE-202): `GET /api/suppliers` **tidak** memfilter `is_active` — supplier
+yang sudah diarsipkan tetap muncul di list (field `is_active` di response tinggal dicek klien),
+karena admin mungkin masih perlu cari supplier lama buat referensi PO/transaksi historis. `?search`
+cocok ke `name` (`ILIKE`, case-insensitive substring); `page`/`limit` sama seperti `/api/products`
+(default `1`/`20`, `limit` di-cap `100`).
+
+Contoh response `POST /api/suppliers` (201):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "8a1b2c3d-4e5f-6789-abcd-ef0123456789",
+    "name": "Toko Emas Makmur",
+    "phone": "081234567890",
+    "address": "Jl. Emas No. 1",
+    "notes": "Supplier utama",
+    "is_active": true,
+    "created_at": "2026-07-31T09:00:00Z",
+    "updated_at": "2026-07-31T09:00:00Z"
+  }
+}
+```
+
+Contoh response `GET /api/suppliers?search=emas&page=1&limit=20` (200):
+```json
+{
+  "success": true,
+  "data": {
+    "items": [ { "...": "objek supplier yang sama seperti di atas" } ],
+    "pagination": { "page": 1, "limit": 20, "total": 1, "total_pages": 1 }
+  }
+}
+```
+
+Contoh response error:
+```json
+// 403 — role selain ADMIN/SUPER_ADMIN
+{"success":false,"error":{"code":"FORBIDDEN","message":"Anda tidak memiliki akses untuk aksi ini"}}
+
+// 400 — name kosong
+{"success":false,"error":{"code":"BAD_REQUEST","message":"name wajib diisi"}}
+
+// 404 — public_id valid tapi tidak ada
+{"success":false,"error":{"code":"NOT_FOUND","message":"supplier tidak ditemukan"}}
+
+// 400 — {id} bukan format UUID
+{"success":false,"error":{"code":"BAD_REQUEST","message":"id tidak valid"}}
+```
+
+### /api/customers — CRUD pelanggan (role split: create/read vs edit/delete)
+
+```bash
+GET    /api/customers        # ?search=&page=&limit=                              -> 200 (ADMIN, KASIR, SUPER_ADMIN)
+POST   /api/customers        # { name, phone?, email?, id_type?, id_number?, address?, notes? } -> 201 (ADMIN, KASIR, SUPER_ADMIN)
+GET    /api/customers/{id}   # detail pelanggan                                     -> 200 / 404 (ADMIN, KASIR, SUPER_ADMIN)
+PUT    /api/customers/{id}   # field yang sama + is_active                          -> 200 / 404 (ADMIN & SUPER_ADMIN)
+DELETE /api/customers/{id}   # soft delete (is_active=false)                        -> 200 / 404 (ADMIN & SUPER_ADMIN)
+```
+
+**Satu-satunya resource di API ini dengan role berbeda per operasi**: `POST`/`GET` (create & read)
+bisa diakses `KASIR` juga (bukan cuma `ADMIN`/`SUPER_ADMIN`) — kasir perlu bisa cepat daftarin
+pelanggan baru & cari data pelanggan pas transaksi. `PUT`/`DELETE` tetap dikunci ke
+`ADMIN`/`SUPER_ADMIN` (lihat `internal/handler/router.go`: `POST`/`GET /customers` ada di grup
+`JWTAuth` tanpa `RequireRole` tambahan, sedangkan `PUT`/`DELETE /customers/{id}` ada di grup
+`RequireRole("ADMIN", "SUPER_ADMIN")` yang sama dengan resource admin-only lainnya).
+
+Cuma `name` yang wajib. `id_type`, kalau diisi, harus `KTP`/`SIM`/`PASSPORT` (400 kalau bukan).
+`?search` cocok ke `name` **atau** `phone` (satu query param, match salah satu). Sama seperti
+`/api/suppliers`: list **tidak** memfilter `is_active` — pelanggan yang diarsipkan tetap muncul
+di list (berguna buat cari histori transaksi pelanggan lama).
+
+Contoh response `POST /api/customers` (201):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "9f8e7d6c-5b4a-3210-9876-543210fedcba",
+    "name": "Budi Santoso",
+    "phone": "081234567890",
+    "email": "budi@example.com",
+    "id_type": "KTP",
+    "id_number": "3201010101010001",
+    "address": "Jl. Melati No. 5",
+    "notes": "",
+    "is_active": true,
+    "created_at": "2026-07-31T09:00:00Z",
+    "updated_at": "2026-07-31T09:00:00Z"
+  }
+}
+```
+
+Contoh response error:
+```json
+// 403 — PUT/DELETE oleh role selain ADMIN/SUPER_ADMIN (KASIR boleh POST/GET, tapi bukan ini)
+{"success":false,"error":{"code":"FORBIDDEN","message":"Anda tidak memiliki akses untuk aksi ini"}}
+
+// 400 — name kosong
+{"success":false,"error":{"code":"BAD_REQUEST","message":"name wajib diisi"}}
+
+// 400 — id_type bukan KTP/SIM/PASSPORT
+{"success":false,"error":{"code":"BAD_REQUEST","message":"id_type harus KTP, SIM, atau PASSPORT"}}
+
+// 404 — public_id valid tapi tidak ada
+{"success":false,"error":{"code":"NOT_FOUND","message":"pelanggan tidak ditemukan"}}
+```
+
+### /api/products/{productId}/stock-items & /api/stock-items — unit stok fisik
+
+```bash
+POST   /api/products/{productId}/stock-items   # tambah unit stok, barcode auto-generate      -> 201 (ADMIN & SUPER_ADMIN)
+GET    /api/products/{productId}/stock-items   # ?status=&condition=&search=&page=&limit=     -> 200 (semua role, token valid)
+GET    /api/stock-items/{id}                   # detail unit lengkap (termasuk barcode)         -> 200 / 404 (semua role, token valid)
+GET    /api/stock-items/{id}/label             # data buat cetak label CODE128                  -> 200 / 404 (semua role, token valid)
+PUT    /api/stock-items/{id}                   # edit unit, barcode & product_id terkunci        -> 200 / 404 / 409 (ADMIN & SUPER_ADMIN)
+DELETE /api/stock-items/{id}                   # HARD delete, hanya unit AVAILABLE               -> 200 / 404 / 409 (ADMIN & SUPER_ADMIN)
+```
+
+`{productId}` maupun `{id}` adalah `public_id` (UUID). Beda dari resource lain di API ini:
+
+- **`DELETE` di sini HARD delete**, satu-satunya di seluruh API — setiap resource lain
+  (`users`/`categories`/`brands`/`products`/`suppliers`) soft-delete via `is_active`. Unit stok
+  yang `AVAILABLE` (belum terjual) dihapus permanen dari DB; unit yang `SOLD` **tidak bisa**
+  dihapus (409) — data transaksi historis harus tetap utuh. Guard-nya di level SQL
+  (`DELETE ... WHERE public_id = $1 AND status = 'AVAILABLE'`), bukan cuma cek-lalu-hapus di
+  level aplikasi — kalau baris tidak ke-delete, baru dicek ulang buat bedain "tidak ada" (404)
+  vs "ada tapi SOLD" (409).
+- **Validasi create pakai status `422`** (`Unprocessable Entity`), bukan `400` seperti endpoint
+  lain — `serial_number`, `condition` (harus `GOOD`/`BAD`), `purchase_price` (harus `> 0`), dan
+  `purchase_date` (format `YYYY-MM-DD`) semua wajib diisi & valid, kalau tidak → 422.
+- **Barcode auto-generate**, format `{SKU}-{urut 4 digit}` (mis. SKU produk `BAT-ANT-10-001` →
+  barcode unit pertama `BAT-ANT-10-001-0001`, unit kedua `...-0002`, dst.) — dihitung + insert
+  dalam satu transaksi DB dengan retry (maks 5x) kalau kena unique constraint
+  `uq_stock_items_barcode`, persis pola SKU produk (BE-201) tapi 4 digit, bukan 3.
+- **Create ditolak (400) kalau produknya sudah diarsipkan** (`is_active=false`) — tidak bisa
+  nambah stok ke produk yang sudah tidak dijual.
+- **`PUT` mengunci `barcode` dan `product_id`** — kolom itu sengaja tidak ada di query `UPDATE`,
+  persis pola SKU produk yang immutable (BE-203). Field yang bisa diedit: `serial_number`,
+  `condition`, `purchase_price`, `purchase_date`, `notes`. Unit yang `SOLD` ditolak (409) —
+  guard-nya fetch-lalu-cek di service (bukan level SQL seperti `DELETE`, karena edit bukan
+  operasi destruktif tanpa-undo).
+- **`GET /api/stock-items/{id}/label`** berlaku untuk unit `AVAILABLE` **maupun** `SOLD` — cetak
+  ulang label diperbolehkan, tidak difilter status.
+- `supplier_id`/`po_id` di luar scope saat ini — selalu `NULL` (belum ada resource purchase
+  order, dan `supplier_id` belum diterima lewat body ini).
+
+Contoh response `POST /api/products/{productId}/stock-items` (201):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
+    "product": { "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f", "name": "Emas Batangan 10gr" },
+    "barcode": "BAT-ANT-10-001-0001",
+    "serial_number": "SN-0001",
+    "condition": "GOOD",
+    "purchase_price": 1000000,
+    "purchase_date": "2026-07-01",
+    "status": "AVAILABLE",
+    "sold_at": null,
+    "notes": "",
+    "created_at": "2026-07-31T09:00:00Z",
+    "updated_at": "2026-07-31T09:00:00Z"
+  }
+}
+```
+
+Contoh response `GET /api/stock-items/{id}/label` (200):
+```json
+{
+  "success": true,
+  "data": {
+    "barcode": "BAT-ANT-10-001-0001",
+    "product_name": "Emas Batangan 10gr",
+    "weight_gram": 10,
+    "serial_number": "SN-0001"
+  }
+}
+```
+
+Contoh response error:
+```json
+// 403 — role selain ADMIN/SUPER_ADMIN (POST/PUT/DELETE)
+{"success":false,"error":{"code":"FORBIDDEN","message":"Anda tidak memiliki akses untuk aksi ini"}}
+
+// 422 — field wajib kosong/invalid saat create atau update
+{"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"serial_number wajib diisi"}}
+{"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"condition wajib diisi dan harus GOOD atau BAD"}}
+{"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"purchase_price wajib diisi lebih besar dari 0"}}
+{"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"purchase_date wajib diisi dengan format YYYY-MM-DD"}}
+
+// 400 — create ke produk yang sudah diarsipkan
+{"success":false,"error":{"code":"BAD_REQUEST","message":"produk sudah diarsipkan, tidak bisa menambah stok"}}
+
+// 409 — update/delete unit yang sudah SOLD
+{"success":false,"error":{"code":"CONFLICT","message":"unit sudah terjual (SOLD), tidak bisa diedit"}}
+{"success":false,"error":{"code":"CONFLICT","message":"unit sudah terjual (SOLD), tidak bisa dihapus"}}
+
+// 404 — {productId} atau {id} tidak ditemukan
+{"success":false,"error":{"code":"NOT_FOUND","message":"produk tidak ditemukan"}}
+{"success":false,"error":{"code":"NOT_FOUND","message":"unit stok tidak ditemukan"}}
+```
+
 ## Middleware JWT & role (internal/middleware/auth.go)
 
 - `appmw.JWTAuth(authService)` — verifikasi Bearer token (signature, expiry, dan status
@@ -597,6 +815,55 @@ Dua lapis test:
 - Produk yang stoknya semua `status='SOLD'` → tetap boleh diarsipkan (200) — guard-nya spesifik
   ke `AVAILABLE`, bukan "ada histori stok apapun"
 - `{id}` tidak ditemukan → 404; format id bukan UUID → 400
+
+**`suppliers_test.go`** — `/api/suppliers` (CRUD, ADMIN & SUPER_ADMIN, BE-301)
+- Semua route tanpa token → 401; role KASIR → 403
+- Alur penuh create → list → get → update → delete: create cuma dengan `name` berhasil
+  (field opsional kosong di response), muncul di list, get by `public_id` benar, update
+  mengubah semua field, delete = soft delete (get setelahnya tetap 200, `is_active=false`)
+- Create tanpa `name` → 400
+- List: `?search=` cocok ke `name`; `?limit=&page=` paginasi dengan benar
+  (`pagination.total`/`total_pages` sesuai)
+- List: supplier yang sudah diarsipkan **tetap** muncul di list (beda dari `/api/products`)
+- Get dengan id bukan UUID → 400; UUID valid tapi tidak ada → 404
+
+**`stock_items_test.go`** — `/api/products/{productId}/stock-items` & `/api/stock-items`
+(BE-501 create, BE-502 list/detail, BE-503 update, BE-504 hard delete, BE-505 label)
+- `POST` (ADMIN & SUPER_ADMIN): tanpa token → 401; role KASIR → 403
+- Create → `barcode == "{SKU}-0001"`, `status == "AVAILABLE"`; dua unit di produk yang sama →
+  barcode kedua `...-0002` (urut naik, sama pola dengan SKU produk)
+- `serial_number` kosong / `condition` kosong atau bukan `GOOD`/`BAD` / `purchase_price <= 0` /
+  `purchase_date` kosong atau format salah → **422** (bukan 400 — status code baru khusus
+  validasi field stock item)
+- Create ke produk yang sudah diarsipkan (`is_active=false`) → 400; `{productId}` tidak ada → 404
+- `GET` list & detail (semua role, token valid): KASIR bisa akses (beda dari endpoint write)
+- List: filter `?status=`/`?condition=` menyempitkan hasil dengan benar (unit `SOLD` di-set
+  langsung lewat SQL di test — belum ada endpoint "mark as sold"); `?search=` cocok ke
+  `serial_number`; `?limit=&page=` paginasi dengan benar
+- Detail: response mengandung `barcode` lengkap; id bukan UUID → 400; tidak ditemukan → 404
+- `PUT` (ADMIN & SUPER_ADMIN): mengubah `serial_number`/`condition`/`purchase_price`/
+  `purchase_date`/`notes`, tapi **`barcode` dan `product.id` tetap sama** — inti acceptance
+  criteria BE-503
+- `PUT` ke unit yang sudah `SOLD` (lewat SQL) → 409; `{id}` tidak ditemukan → 404; field
+  invalid → 422
+- `DELETE` (ADMIN & SUPER_ADMIN) unit `AVAILABLE` → 200, lalu `GET /{id}` setelahnya → **404**
+  (kolomnya beneran hilang dari DB — hard delete, bukan soft delete kayak resource lain)
+- `DELETE` unit yang sudah `SOLD` → 409, unit tetap ada setelahnya (guard di level SQL
+  `AND status = 'AVAILABLE'` di `stock_item_repository.go`, bukan cuma cek aplikasi)
+- `GET /{id}/label` mengembalikan `barcode`/`product_name`/`weight_gram`/`serial_number`;
+  tetap 200 untuk unit yang sudah `SOLD` (cetak ulang diperbolehkan); tidak ditemukan → 404
+
+**`customers_test.go`** — `/api/customers` (CRUD dengan role split, BE-601)
+- `POST`/`GET`/`GET /{id}` tanpa token → 401
+- **KASIR bisa `POST`/`GET`/`GET /{id}`** (beda dari semua resource lain — di sini create/read
+  memang dibuka buat kasir), tapi **403** kalau KASIR coba `PUT`/`DELETE`
+- Alur penuh create → list → get → update → delete: create cuma dengan `name` berhasil (field
+  opsional kosong di response), muncul di list, get benar, update mengubah semua field, delete =
+  soft delete (get setelahnya tetap 200, `is_active=false`)
+- Create tanpa `name` → 400; `id_type` di luar `KTP`/`SIM`/`PASSPORT` → 400
+- List: `?search=` cocok ke `name` **atau** `phone`; `?limit=&page=` paginasi dengan benar
+- List: pelanggan yang diarsipkan **tetap** muncul di list (sama seperti `/api/suppliers`)
+- Get dengan id bukan UUID → 400; UUID valid tapi tidak ada → 404
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta
