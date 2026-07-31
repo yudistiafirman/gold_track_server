@@ -1,5 +1,6 @@
 CREATE TABLE stock_items (
     id              BIGSERIAL PRIMARY KEY,
+    public_id       UUID           NOT NULL DEFAULT gen_random_uuid(),
     product_id      BIGINT         NOT NULL REFERENCES products (id),
     barcode         VARCHAR(50)    NOT NULL,
     serial_number   VARCHAR(100)   NOT NULL,
@@ -14,7 +15,8 @@ CREATE TABLE stock_items (
     created_by      BIGINT         NOT NULL REFERENCES users (id),
     created_at      TIMESTAMPTZ    NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ    NOT NULL DEFAULT now(),
-    CONSTRAINT uq_stock_items_barcode UNIQUE (barcode)
+    CONSTRAINT uq_stock_items_barcode UNIQUE (barcode),
+    CONSTRAINT uq_stock_items_public_id UNIQUE (public_id)
 );
 
 CREATE INDEX idx_stock_items_status ON stock_items (status);

@@ -2,10 +2,10 @@ package handler
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 
+	appmw "gold-track-be/internal/middleware"
 	"gold-track-be/internal/service"
 	"gold-track-be/pkg/apperror"
 	"gold-track-be/pkg/response"
@@ -30,7 +30,7 @@ type loginResponse struct {
 }
 
 type userBrief struct {
-	ID   int64  `json:"id"`
+	ID   string `json:"id"`
 	Name string `json:"name"`
 	Role string `json:"role"`
 }
@@ -60,38 +60,26 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, loginResponse{
 		Token: result.Token,
 		User: userBrief{
-			ID:   result.User.ID,
+			ID:   result.User.PublicID,
 			Name: result.User.Name,
 			Role: result.User.Role,
 		},
 	})
 }
 
+// Logout runs behind the JWTAuth middleware, so claims are already verified
+// and available in the request context.
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	token, err := bearerToken(r)
-	if err != nil {
-		response.Error(w, apperror.Unauthorized("token tidak ditemukan", err))
+	claims, ok := appmw.ClaimsFromContext(r.Context())
+	if !ok {
+		response.Error(w, apperror.Unauthorized("token tidak ditemukan", nil))
 		return
 	}
 
-	if err := h.authService.Logout(r.Context(), token); err != nil {
+	if err := h.authService.Logout(r.Context(), claims); err != nil {
 		response.Error(w, err)
 		return
 	}
 
 	response.JSON(w, http.StatusOK, map[string]string{"message": "logout berhasil"})
-}
-
-func bearerToken(r *http.Request) (string, error) {
-	header := r.Header.Get("Authorization")
-	prefix := "Bearer "
-	if !strings.HasPrefix(header, prefix) {
-		return "", errors.New("missing or malformed authorization header")
-	}
-
-	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
-	if token == "" {
-		return "", errors.New("empty bearer token")
-	}
-	return token, nil
 }

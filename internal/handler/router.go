@@ -8,11 +8,23 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 
 	appmw "gold-track-be/internal/middleware"
+	"gold-track-be/internal/service"
 )
 
 // NewRouter wires global middleware (request id, centralized recovery +
 // error response, request logging) and all route registrations.
-func NewRouter(logger *slog.Logger, healthHandler *HealthHandler, authHandler *AuthHandler) http.Handler {
+//
+// /api/auth/login is intentionally outside the JWTAuth group — a client
+// can't present a token before it has one. Every other /api route should be
+// registered behind r.Use(appmw.JWTAuth(authService)), optionally chained
+// with appmw.RequireRole(...) for role-restricted actions.
+func NewRouter(
+	logger *slog.Logger,
+	healthHandler *HealthHandler,
+	authHandler *AuthHandler,
+	authService service.AuthService,
+	userHandler *UserHandler,
+) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
@@ -24,7 +36,22 @@ func NewRouter(logger *slog.Logger, healthHandler *HealthHandler, authHandler *A
 
 	r.Route("/api", func(r chi.Router) {
 		r.Post("/auth/login", authHandler.Login)
-		r.Post("/auth/logout", authHandler.Logout)
+
+		r.Group(func(r chi.Router) {
+			r.Use(appmw.JWTAuth(authService))
+			r.Post("/auth/logout", authHandler.Logout)
+
+			r.Group(func(r chi.Router) {
+				r.Use(appmw.RequireRole("SUPER_ADMIN"))
+				r.Route("/users", func(r chi.Router) {
+					r.Get("/", userHandler.List)
+					r.Post("/", userHandler.Create)
+					r.Get("/{id}", userHandler.Get)
+					r.Put("/{id}", userHandler.Update)
+					r.Delete("/{id}", userHandler.Delete)
+				})
+			})
+		})
 	})
 
 	return r

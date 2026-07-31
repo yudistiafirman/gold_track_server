@@ -45,7 +45,10 @@ func main() {
 	authService := service.NewAuthService(userRepo, tokenBlacklistRepo, cfg.JWT.Secret, cfg.JWT.Expiry)
 	authHandler := handler.NewAuthHandler(authService)
 
-	router := handler.NewRouter(log, healthHandler, authHandler)
+	userService := service.NewUserService(userRepo)
+	userHandler := handler.NewUserHandler(userService)
+
+	router := handler.NewRouter(log, healthHandler, authHandler, authService, userHandler)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.App.Port,

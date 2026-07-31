@@ -1,5 +1,6 @@
 CREATE TABLE transaction_items (
     id              BIGSERIAL PRIMARY KEY,
+    public_id       UUID           NOT NULL DEFAULT gen_random_uuid(),
     transaction_id  BIGINT         NOT NULL REFERENCES transactions (id),
     stock_item_id   BIGINT         NOT NULL REFERENCES stock_items (id),
     product_name    VARCHAR(200)   NOT NULL,
@@ -7,5 +8,6 @@ CREATE TABLE transaction_items (
     price_per_gram  NUMERIC(15,2)  NOT NULL,
     price_total     NUMERIC(15,2)  NOT NULL,
     cogs            NUMERIC(15,2),
-    created_at      TIMESTAMPTZ    NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ    NOT NULL DEFAULT now(),
+    CONSTRAINT uq_transaction_items_public_id UNIQUE (public_id)
 );

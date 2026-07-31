@@ -27,9 +27,9 @@ type LoginInput struct {
 }
 
 type AuthenticatedUser struct {
-	ID   int64
-	Name string
-	Role string
+	PublicID string
+	Name     string
+	Role     string
 }
 
 type LoginResult struct {
@@ -38,16 +38,23 @@ type LoginResult struct {
 }
 
 // Claims is the JWT payload: user_id/role for authorization, plus the
-// registered "jti" (used as the blacklist key on logout) and "exp".
+// registered "jti" (used as the blacklist key on logout) and "exp". UserID
+// holds the user's public_id (UUID) — the internal bigint PK never leaves
+// the database layer, including inside tokens.
 type Claims struct {
-	UserID int64  `json:"user_id"`
+	UserID string `json:"user_id"`
 	Role   string `json:"role"`
 	jwt.RegisteredClaims
 }
 
 type AuthService interface {
 	Login(ctx context.Context, input LoginInput) (LoginResult, error)
-	Logout(ctx context.Context, tokenString string) error
+	// Logout blacklists an already-verified token (see VerifyToken / the
+	// JWTAuth middleware, which populates Claims from the request).
+	Logout(ctx context.Context, claims *Claims) error
+	// VerifyToken checks signature, expiry, and blacklist status. Used by the
+	// JWTAuth middleware to authenticate incoming requests.
+	VerifyToken(ctx context.Context, tokenString string) (*Claims, error)
 }
 
 type authService struct {
@@ -84,7 +91,7 @@ func (s *authService) Login(ctx context.Context, input LoginInput) (LoginResult,
 		return LoginResult{}, apperror.Unauthorized(invalidCredentialsMessage, nil)
 	}
 
-	token, err := s.generateToken(user.ID, user.Role)
+	token, err := s.generateToken(user.PublicID, user.Role)
 	if err != nil {
 		return LoginResult{}, apperror.Internal("failed to generate token", err)
 	}
@@ -96,22 +103,16 @@ func (s *authService) Login(ctx context.Context, input LoginInput) (LoginResult,
 	return LoginResult{
 		Token: token,
 		User: AuthenticatedUser{
-			ID:   user.ID,
-			Name: user.Name,
-			Role: user.Role,
+			PublicID: user.PublicID,
+			Name:     user.Name,
+			Role:     user.Role,
 		},
 	}, nil
 }
 
-// Logout blacklists the token's jti until its natural expiry. A token that
-// fails verification (bad signature, expired, or already blacklisted) is
-// rejected — there is nothing meaningful to invalidate.
-func (s *authService) Logout(ctx context.Context, tokenString string) error {
-	claims, err := s.verifyToken(ctx, tokenString)
-	if err != nil {
-		return err
-	}
-
+// Logout blacklists the token's jti until its natural expiry. Callers must
+// pass claims obtained from VerifyToken (the JWTAuth middleware does this).
+func (s *authService) Logout(ctx context.Context, claims *Claims) error {
 	expiresAt := time.Now().Add(s.jwtExpiry)
 	if claims.ExpiresAt != nil {
 		expiresAt = claims.ExpiresAt.Time
@@ -123,7 +124,7 @@ func (s *authService) Logout(ctx context.Context, tokenString string) error {
 	return nil
 }
 
-func (s *authService) generateToken(userID int64, role string) (string, error) {
+func (s *authService) generateToken(publicUserID string, role string) (string, error) {
 	jti, err := generateJTI()
 	if err != nil {
 		return "", fmt.Errorf("generate jti: %w", err)
@@ -131,7 +132,7 @@ func (s *authService) generateToken(userID int64, role string) (string, error) {
 
 	now := time.Now()
 	claims := Claims{
-		UserID: userID,
+		UserID: publicUserID,
 		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        jti,
@@ -144,9 +145,9 @@ func (s *authService) generateToken(userID int64, role string) (string, error) {
 	return token.SignedString(s.jwtSecret)
 }
 
-// verifyToken checks the JWT signature and expiry, then rejects tokens whose
+// VerifyToken checks the JWT signature and expiry, then rejects tokens whose
 // jti is already blacklisted (e.g. from a previous logout).
-func (s *authService) verifyToken(ctx context.Context, tokenString string) (*Claims, error) {
+func (s *authService) VerifyToken(ctx context.Context, tokenString string) (*Claims, error) {
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {

@@ -1,5 +1,6 @@
 CREATE TABLE transactions (
     id                BIGSERIAL PRIMARY KEY,
+    public_id         UUID           NOT NULL DEFAULT gen_random_uuid(),
     transaction_code  VARCHAR(30)    NOT NULL,
     type              VARCHAR(15)    NOT NULL CHECK (type IN ('SELL', 'BUY', 'SELL_SUPPLIER')),
     customer_id       BIGINT         REFERENCES customers (id),
@@ -15,7 +16,8 @@ CREATE TABLE transactions (
     created_by        BIGINT         NOT NULL REFERENCES users (id),
     created_at        TIMESTAMPTZ    NOT NULL DEFAULT now(),
     completed_at      TIMESTAMPTZ,
-    CONSTRAINT uq_transactions_transaction_code UNIQUE (transaction_code)
+    CONSTRAINT uq_transactions_transaction_code UNIQUE (transaction_code),
+    CONSTRAINT uq_transactions_public_id UNIQUE (public_id)
 );
 
 CREATE INDEX idx_transactions_type ON transactions (type);

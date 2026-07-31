@@ -11,7 +11,7 @@ migrations/              file SQL migrasi, satu tabel per file (up & down)
 internal/config/         baca konfigurasi dari env (+ .env untuk lokal)
 internal/logger/         structured logger (log/slog)
 internal/database/       koneksi pool PostgreSQL (pgxpool)
-internal/middleware/     logging & error-handling (recover) global
+internal/middleware/     logging, error-handling (recover), JWT auth & role check global
 internal/repository/     akses data (query ke PostgreSQL)
 internal/service/        business logic
 internal/handler/        HTTP handler + router (chi)
@@ -22,6 +22,24 @@ pkg/response/            format response JSON konsisten
 Alur tiap fitur mengikuti: `handler` menerima request → panggil `service` →
 `service` panggil `repository` → hasil/­error mengalir balik lewat `pkg/response`
 dan `pkg/apperror`.
+
+## Strategi ID: BIGINT internal + public_id (UUID) eksternal
+
+Semua tabel resource (semua kecuali `token_blacklist`) punya dua identifier:
+
+- **`id BIGSERIAL`** — PK internal, dipakai untuk FK/join antar tabel (cepat, kecil, bagus buat
+  laporan/transaksi yang banyak join). **Tidak pernah** keluar ke API, URL, response JSON, atau JWT.
+- **`public_id UUID NOT NULL DEFAULT gen_random_uuid()`** (unique) — satu-satunya identifier yang
+  dilihat klien: dipakai di path param URL (`/api/users/{id}` isinya UUID), di body response JSON
+  (field `"id"`), dan di dalam klaim `user_id` JWT. Mencegah enumerasi resource lewat id sekuensial
+  (`/users/1`, `/users/2`, dst).
+
+Postgres 13+ punya `gen_random_uuid()` built-in di core — tidak perlu `CREATE EXTENSION pgcrypto`.
+
+Pola buat tabel/endpoint baru: query repository selalu `SELECT ... public_id::text ...` (cast eksplisit
+supaya aman di-scan ke Go `string`, terlepas dari codec UUID pgx), lalu di layer `service`/`handler`
+hanya `public_id` yang dipetakan ke DTO/response — struct `model.X` (yang punya `ID int64` internal)
+tidak pernah dikembalikan langsung ke handler.
 
 ## Menjalankan lokal
 
@@ -107,6 +125,56 @@ disimpan di tabel `token_blacklist` sampai waktu expiry aslinya. Setiap request
 `"Token tidak valid atau sudah tidak berlaku"` — jadi token yang sama tidak bisa
 dipakai dua kali setelah logout. Request tanpa header `Authorization: Bearer <jwt>`
 yang valid juga ditolak 401.
+
+### /api/users — CRUD user (SUPER_ADMIN saja)
+
+Semua route ini butuh `Authorization: Bearer <jwt>` DAN role `SUPER_ADMIN` (role lain → 403).
+
+```bash
+GET    /api/users        # list semua user
+POST   /api/users        # { name, email, password, role }         -> 201
+GET    /api/users/{id}   # detail user                              -> 200 / 404
+PUT    /api/users/{id}   # { name, email, role, is_active, password? } -> 200 / 404 / 409
+DELETE /api/users/{id}   # soft delete (is_active=false)             -> 200 / 404
+```
+
+`{id}` di URL adalah `public_id` (UUID, contoh `097bbdc9-6e81-4af1-a167-705f2970a30b`), bukan
+angka sekuensial — format lain langsung ditolak 400 sebelum sempat query ke DB.
+
+Catatan:
+- `password` di response **tidak pernah** dikembalikan.
+- `email` unik — konflik → 409.
+- `password` di `PUT` opsional; kosongkan untuk mempertahankan password lama.
+- `DELETE` adalah **soft delete** (`is_active=false`), bukan hapus baris — semua tabel lain
+  referensi `users.id` lewat FK tanpa `ON DELETE CASCADE`, jadi hard delete akan gagal begitu
+  user itu pernah membuat data apa pun. Reaktivasi lewat `PUT` dengan `is_active: true`.
+- SUPER_ADMIN tidak bisa menonaktifkan akun sendiri lewat `DELETE` (mencegah lockout).
+
+## Middleware JWT & role (internal/middleware/auth.go)
+
+- `appmw.JWTAuth(authService)` — verifikasi Bearer token (signature, expiry, dan status
+  blacklist). Token hilang/rusak/kedaluwarsa/sudah di-blacklist → 401. Kalau lolos, claims
+  (`user_id`, `role`, `jti`) disimpan di request context lewat `appmw.ClaimsFromContext(ctx)`.
+- `appmw.RequireRole("ADMIN", "SUPER_ADMIN", ...)` — jalan setelah `JWTAuth`, cek `claims.Role`
+  ada di daftar role yang diizinkan. Role tidak cocok → 403.
+
+Cara pakai di route baru (lihat `internal/handler/router.go`):
+```go
+r.Group(func(r chi.Router) {
+    r.Use(appmw.JWTAuth(authService))
+    r.Get("/products", productHandler.List)                          // semua role login
+
+    r.Group(func(r chi.Router) {
+        r.Use(appmw.RequireRole("ADMIN", "SUPER_ADMIN"))
+        r.Post("/products", productHandler.Create)                   // ADMIN/SUPER_ADMIN saja
+    })
+})
+```
+
+`POST /api/auth/login` sengaja **tidak** dipasangi `JWTAuth` — klien belum punya token saat
+login. `POST /api/auth/logout` sudah jadi contoh nyata endpoint terproteksi (perlu token valid,
+role bebas). Endpoint bisnis lain (products, stock, dst.) akan dipasangi middleware yang sama
+saat dibuat di ticket berikutnya.
 
 ## Konfigurasi (env)
 

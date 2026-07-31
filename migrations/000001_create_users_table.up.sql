@@ -1,5 +1,6 @@
 CREATE TABLE users (
     id             BIGSERIAL PRIMARY KEY,
+    public_id      UUID         NOT NULL DEFAULT gen_random_uuid(),
     name           VARCHAR(200) NOT NULL,
     email          VARCHAR(200) NOT NULL,
     password_hash  VARCHAR(255) NOT NULL,
@@ -8,5 +9,6 @@ CREATE TABLE users (
     last_login_at  TIMESTAMPTZ,
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    CONSTRAINT uq_users_email UNIQUE (email)
+    CONSTRAINT uq_users_email UNIQUE (email),
+    CONSTRAINT uq_users_public_id UNIQUE (public_id)
 );

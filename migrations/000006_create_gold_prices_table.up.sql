@@ -1,5 +1,6 @@
 CREATE TABLE gold_prices (
     id               BIGSERIAL PRIMARY KEY,
+    public_id        UUID          NOT NULL DEFAULT gen_random_uuid(),
     price_buy        NUMERIC(15,2) NOT NULL,
     price_sell       NUMERIC(15,2) NOT NULL,
     price_reference  NUMERIC(15,2),
@@ -11,7 +12,8 @@ CREATE TABLE gold_prices (
     source           VARCHAR(100),
     notes            TEXT,
     created_by       BIGINT        NOT NULL REFERENCES users (id),
-    created_at       TIMESTAMPTZ   NOT NULL DEFAULT now()
+    created_at       TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    CONSTRAINT uq_gold_prices_public_id UNIQUE (public_id)
 );
 
 CREATE INDEX idx_gold_prices_is_active ON gold_prices (is_active);
