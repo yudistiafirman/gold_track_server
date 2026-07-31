@@ -1330,13 +1330,14 @@ Contoh response error:
 ### /api/reports — laporan (BE-1301/BE-1302/BE-1303, ADMIN & SUPER_ADMIN)
 
 ```bash
-GET /api/reports/transactions   # ?from=&to=&type=       -> 200
-GET /api/reports/stock          # ?threshold=             -> 200
-GET /api/reports/finance        # ?from=&to=               -> 200
+GET /api/reports/transactions   # ?from=&to=&type=                          -> 200
+GET /api/reports/stock          # ?threshold=                                -> 200
+GET /api/reports/finance        # ?from=&to=                                 -> 200
+GET /api/reports/dashboard      # ?from=&to=&threshold=&pending_limit=       -> 200
 ```
 
-Tiga endpoint read-only, tanpa pagination (hasil agregat yang jumlahnya sudah kebatasi — beberapa
-baris per tipe, satu baris per produk aktif, tiga angka — bukan listing per baris).
+Empat endpoint read-only, tanpa pagination (hasil agregat yang jumlahnya sudah kebatasi — beberapa
+baris per tipe, satu baris per produk aktif, beberapa angka — bukan listing per baris).
 
 **`GET /api/reports/transactions`** — rekap `transaction_count`/`total_amount`/`total_weight`
 per tipe (`SELL`, `BUY`, `SELL_SUPPLIER`). `?from=&to=` masing-masing independen opsional
@@ -1374,6 +1375,27 @@ tiap request, tidak disimpan di mana pun (tidak ada setting baru buat ini).
 
 `?from=&to=` sama seperti laporan transaksi — masing-masing independen opsional, filter transaksi
 di `created_at::date`, filter expense langsung di `expense_date` (kolom `DATE` asli).
+
+**`GET /api/reports/dashboard`** — satu payload gabungan buat halaman dashboard admin, isinya
+komposisi dari tiga laporan di atas plus satu data baru (PO yang masih pending):
+
+- `finance` — persis isi `/api/reports/finance` (tanpa `from`/`to` di dalamnya, karena sudah ada
+  di level atas `dashboard`), dipanggil lewat `FinanceReport` internal — **bukan** query terpisah,
+  jadi angkanya dijamin selalu konsisten dengan endpoint finance yang berdiri sendiri.
+- `transaction_breakdown[]`/`transaction_total` — persis isi `/api/reports/transactions` (tanpa
+  filter `type`, karena dashboard mau semua tipe), juga lewat `TransactionReport` internal.
+- `low_stock_items[]`/`low_stock_threshold` — subset dari `/api/reports/stock`, **difilter cuma
+  yang `low_stock=true`** (dashboard cuma mau yang actionable, bukan seluruh katalog produk
+  aktif); `?threshold=` sama seperti laporan stok, default `5`.
+- `pending_purchase_orders[]`/`pending_purchase_orders_total` — PO yang masih `status=BELUM_DITERIMA`,
+  terbaru duluan, dibatasi `?pending_limit=` (default `5`) — tapi `_total` selalu jumlah
+  sebenarnya, walau lebih besar dari yang ditampilkan di `pending_purchase_orders[]`.
+
+**`?from=&to=` default ke bulan berjalan** (tanggal 1 bulan ini sampai hari ini, dalam **UTC** —
+bukan timezone lokal server, karena `created_at::date` di Postgres dibandingkan dalam timezone
+sesi DB yang UTC; pakai timezone lokal di sini bisa diam-diam menghilangkan transaksi "hari ini"
+kalau tanggal lokal server sudah ganti hari duluan sebelum UTC-nya) kalau keduanya tidak diisi;
+kalau salah satu/keduanya diisi, dipakai persis seperti apa adanya (sama seperti laporan lain).
 
 Contoh response `GET /api/reports/transactions` (200):
 ```json
@@ -1413,6 +1435,35 @@ Contoh response `GET /api/reports/finance` (200):
     "gross_margin_percent": 29.56,
     "total_expenses": 1200000,
     "net_profit": 3500000
+  }
+}
+```
+
+Contoh response `GET /api/reports/dashboard` (200):
+```json
+{
+  "success": true,
+  "data": {
+    "from": "2026-08-01",
+    "to": "2026-08-01",
+    "finance": {
+      "sales_breakdown": [ { "...": "sama seperti /api/reports/finance, tanpa from/to" } ],
+      "expense_breakdown": [ { "...": "idem" } ],
+      "total_revenue": 1500000, "total_cogs": 1000000, "gross_profit": 500000,
+      "gross_margin_percent": 33.33, "total_expenses": 0, "net_profit": 500000
+    },
+    "transaction_breakdown": [
+      { "type": "SELL", "transaction_count": 1, "total_amount": 1500000, "total_weight": 10 }
+    ],
+    "transaction_total": { "transaction_count": 1, "total_amount": 1500000, "total_weight": 10 },
+    "low_stock_threshold": 5,
+    "low_stock_items": [
+      { "product": { "id": "...", "name": "Cincin Emas 5gr", "sku": "..." }, "available_count": 1, "good_count": 1, "bad_count": 0, "low_stock": true }
+    ],
+    "pending_purchase_orders": [
+      { "id": "...", "po_code": "PO-20260801-0001", "supplier_name": "Toko Emas Jaya", "total_amount": 800000, "created_at": "2026-08-01T09:00:00Z" }
+    ],
+    "pending_purchase_orders_total": 1
   }
 }
 ```
@@ -1734,7 +1785,7 @@ Dua lapis test:
   open-ended kalau cuma salah satu diisi); `?page=&limit=` paginasi; `?category_id=` yang tidak
   ditemukan → 404
 
-**`reports_test.go`** — `/api/reports` (BE-1301/BE-1302/BE-1303)
+**`reports_test.go`** — `/api/reports` (BE-1301/BE-1302/BE-1303, plus `/dashboard`)
 - Semua endpoint tanpa token → 401; role KASIR → 403
 - **Transactions**: satu transaksi `SELL`, `BUY`, dan `SELL_SUPPLIER` → `breakdown[]` berisi
   ketiganya dengan `transaction_count`/`total_amount`/`total_weight` yang benar, `total` adalah
@@ -1757,6 +1808,17 @@ Dua lapis test:
   tetap `0` (bukan `NaN`/`Inf`, yang bikin JSON decode gagal) kalau belum ada penjualan sama
   sekali di periode itu; `?from=&to=` memfilter baik transaksi maupun expense dengan benar;
   format tanggal salah → 400
+- **Dashboard**: tanpa `?from=&to=` → default ke bulan berjalan dalam **UTC** (transaksi bulan
+  lalu, di-backdate lewat SQL, tidak ikut kehitung; transaksi bulan ini ikut); `?from=&to=`
+  override bekerja sama seperti laporan lain; `finance`/`transaction_breakdown`/
+  `transaction_total` di response dashboard **sama persis** dengan hasil manggil
+  `/api/reports/finance` dan `/api/reports/transactions` buat rentang yang sama (bukti dashboard
+  benar-benar reuse service yang sama, bukan implementasi kedua yang bisa drift); `low_stock_items[]`
+  cuma berisi produk yang `low_stock=true` (produk yang stoknya banyak tetap muncul di
+  `/api/reports/stock` tapi tidak di sini); `?threshold=` override berlaku sama; `pending_purchase_orders[]`
+  cuma PO `BELUM_DITERIMA` (PO yang sudah dibatalkan tidak ikut), terbaru duluan, dibatasi
+  `?pending_limit=` (default 5) sementara `pending_purchase_orders_total` tetap jumlah sebenarnya
+  walau melebihi batas tampil
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta

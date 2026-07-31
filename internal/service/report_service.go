@@ -86,10 +86,46 @@ type FinanceReportSummary struct {
 	NetProfit          float64
 }
 
+const defaultDashboardPendingPOLimit = 5
+
+// PendingPurchaseOrderSummary is one row of the dashboard's "awaiting
+// receipt" list.
+type PendingPurchaseOrderSummary struct {
+	PublicID     string
+	POCode       string
+	SupplierName string
+	TotalAmount  float64
+	CreatedAt    time.Time
+}
+
+type DashboardInput struct {
+	DateFrom     string // "" + DateTo == "" together → defaults to the current month
+	DateTo       string
+	Threshold    int // stock low-stock threshold, same default (5) as StockReport
+	PendingLimit int // default 5
+}
+
+// DashboardSummary composes the other three reports plus pending POs —
+// FinanceReport/TransactionReport/StockReport are called internally
+// (not reimplemented) so the dashboard and the standalone report
+// endpoints can never drift apart.
+type DashboardSummary struct {
+	From                       string
+	To                         string
+	Finance                    FinanceReportSummary
+	TransactionBreakdown       []repository.TransactionTypeBreakdown
+	TransactionTotal           TransactionReportTotals
+	LowStockThreshold          int
+	LowStockItems              []StockReportItem // StockReport's Items filtered to LowStock == true
+	PendingPurchaseOrders      []PendingPurchaseOrderSummary
+	PendingPurchaseOrdersTotal int
+}
+
 type ReportService interface {
 	TransactionReport(ctx context.Context, input TransactionReportInput) (TransactionReportSummary, error)
 	StockReport(ctx context.Context, threshold int) (StockReportSummary, error)
 	FinanceReport(ctx context.Context, input FinanceReportInput) (FinanceReportSummary, error)
+	Dashboard(ctx context.Context, input DashboardInput) (DashboardSummary, error)
 }
 
 type reportService struct {
@@ -215,6 +251,73 @@ func (s *reportService) FinanceReport(ctx context.Context, input FinanceReportIn
 		GrossMarginPercent: marginPercent,
 		TotalExpenses:      totalExpenses,
 		NetProfit:          grossProfit - totalExpenses,
+	}, nil
+}
+
+func (s *reportService) Dashboard(ctx context.Context, input DashboardInput) (DashboardSummary, error) {
+	dateFrom, dateTo := input.DateFrom, input.DateTo
+	if strings.TrimSpace(dateFrom) == "" && strings.TrimSpace(dateTo) == "" {
+		// UTC, not server-local time: transactions.created_at is filtered
+		// via Postgres' created_at::date, and the DB session runs in UTC —
+		// using local time here could silently exclude "today"'s rows
+		// whenever the server's local date has already rolled over but the
+		// UTC date (what the DB actually compares against) hasn't yet.
+		now := time.Now().UTC()
+		firstOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		dateFrom = firstOfMonth.Format(reportDateLayout)
+		dateTo = now.Format(reportDateLayout)
+	}
+
+	finance, err := s.FinanceReport(ctx, FinanceReportInput{DateFrom: dateFrom, DateTo: dateTo})
+	if err != nil {
+		return DashboardSummary{}, err
+	}
+
+	txReport, err := s.TransactionReport(ctx, TransactionReportInput{DateFrom: dateFrom, DateTo: dateTo})
+	if err != nil {
+		return DashboardSummary{}, err
+	}
+
+	stockReport, err := s.StockReport(ctx, input.Threshold)
+	if err != nil {
+		return DashboardSummary{}, err
+	}
+	lowStockItems := make([]StockReportItem, 0)
+	for _, item := range stockReport.Items {
+		if item.LowStock {
+			lowStockItems = append(lowStockItems, item)
+		}
+	}
+
+	pendingLimit := input.PendingLimit
+	if pendingLimit <= 0 {
+		pendingLimit = defaultDashboardPendingPOLimit
+	}
+	pendingRows, pendingTotal, err := s.reportRepo.PendingPurchaseOrders(ctx, pendingLimit)
+	if err != nil {
+		return DashboardSummary{}, apperror.Internal("failed to fetch pending purchase orders", err)
+	}
+	pendingItems := make([]PendingPurchaseOrderSummary, 0, len(pendingRows))
+	for _, p := range pendingRows {
+		pendingItems = append(pendingItems, PendingPurchaseOrderSummary{
+			PublicID:     p.PublicID,
+			POCode:       p.POCode,
+			SupplierName: p.SupplierName,
+			TotalAmount:  p.TotalAmount,
+			CreatedAt:    p.CreatedAt,
+		})
+	}
+
+	return DashboardSummary{
+		From:                       dateFrom,
+		To:                         dateTo,
+		Finance:                    finance,
+		TransactionBreakdown:       txReport.Breakdown,
+		TransactionTotal:           txReport.Total,
+		LowStockThreshold:          stockReport.Threshold,
+		LowStockItems:              lowStockItems,
+		PendingPurchaseOrders:      pendingItems,
+		PendingPurchaseOrdersTotal: pendingTotal,
 	}, nil
 }
 

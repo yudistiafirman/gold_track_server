@@ -390,9 +390,7 @@ type expenseCategoryBreakdownDTO struct {
 	TotalAmount float64       `json:"total_amount"`
 }
 
-type financeReportDTO struct {
-	From               string                        `json:"from"`
-	To                 string                        `json:"to"`
+type financeSummaryDTO struct {
 	SalesBreakdown     []salesTypeProfitDTO          `json:"sales_breakdown"`
 	ExpenseBreakdown   []expenseCategoryBreakdownDTO `json:"expense_breakdown"`
 	TotalRevenue       float64                       `json:"total_revenue"`
@@ -401,6 +399,12 @@ type financeReportDTO struct {
 	GrossMarginPercent float64                       `json:"gross_margin_percent"`
 	TotalExpenses      float64                       `json:"total_expenses"`
 	NetProfit          float64                       `json:"net_profit"`
+}
+
+type financeReportDTO struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	financeSummaryDTO
 }
 
 func salesBreakdownByType(report financeReportDTO, txType string) *salesTypeProfitDTO {
@@ -663,5 +667,274 @@ func TestReports_FinanceBadDateFormat(t *testing.T) {
 	status, resp := doRequest(t, http.MethodGet, "/api/reports/finance?to=31-07-2026", nil, adminToken)
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
+	}
+}
+
+// --- GET /api/reports/dashboard ---
+
+type pendingPurchaseOrderDTO struct {
+	ID           string  `json:"id"`
+	POCode       string  `json:"po_code"`
+	SupplierName string  `json:"supplier_name"`
+	TotalAmount  float64 `json:"total_amount"`
+}
+
+type dashboardDTO struct {
+	From                       string                        `json:"from"`
+	To                         string                        `json:"to"`
+	Finance                    financeSummaryDTO             `json:"finance"`
+	TransactionBreakdown       []transactionTypeBreakdownDTO `json:"transaction_breakdown"`
+	TransactionTotal           transactionReportTotalsDTO    `json:"transaction_total"`
+	LowStockThreshold          int                           `json:"low_stock_threshold"`
+	LowStockItems              []stockReportItemDTO          `json:"low_stock_items"`
+	PendingPurchaseOrders      []pendingPurchaseOrderDTO     `json:"pending_purchase_orders"`
+	PendingPurchaseOrdersTotal int                           `json:"pending_purchase_orders_total"`
+}
+
+func TestReports_DashboardRequiresAuth(t *testing.T) {
+	resetDB(t)
+
+	status, _ := doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", status)
+	}
+}
+
+func TestReports_DashboardNonAdminForbidden(t *testing.T) {
+	resetDB(t)
+	kasir := seedUser(t, "KASIR", true)
+	token := login(t, kasir.Email, kasir.Password)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, token)
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestReports_DashboardDefaultsToCurrentMonth(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	thisMonthItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "DASH-THIS-MONTH"}))
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": thisMonthItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("this-month sell: expected 201, got %d (resp=%+v)", status, resp)
+	}
+
+	lastMonthItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "DASH-LAST-MONTH"}))
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": lastMonthItem.ID, "price_total": 3000000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("last-month sell: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var lastMonthTx transactionDTO
+	decodeData(t, resp, &lastMonthTx)
+	lastMonth := time.Now().AddDate(0, -1, 0)
+	setTransactionCreatedAt(t, lastMonthTx.ID, lastMonth)
+
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var dashboard dashboardDTO
+	decodeData(t, resp, &dashboard)
+
+	nowUTC := time.Now().UTC()
+	firstOfMonth := time.Date(nowUTC.Year(), nowUTC.Month(), 1, 0, 0, 0, 0, time.UTC)
+	wantFrom := firstOfMonth.Format("2006-01-02")
+	wantTo := nowUTC.Format("2006-01-02")
+	if dashboard.From != wantFrom || dashboard.To != wantTo {
+		t.Fatalf("expected default range %s..%s, got %s..%s", wantFrom, wantTo, dashboard.From, dashboard.To)
+	}
+	if dashboard.TransactionTotal.TransactionCount != 1 || dashboard.TransactionTotal.TotalAmount != 1500000 {
+		t.Fatalf("expected only the this-month transaction counted, got %+v", dashboard.TransactionTotal)
+	}
+}
+
+func TestReports_DashboardDateRangeOverride(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	item := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": item.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("sell: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+	setTransactionCreatedAt(t, tx.ID, time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC))
+
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard?from=2026-07-01&to=2026-07-31", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var dashboard dashboardDTO
+	decodeData(t, resp, &dashboard)
+	if dashboard.From != "2026-07-01" || dashboard.To != "2026-07-31" {
+		t.Fatalf("expected echoed override range, got %s..%s", dashboard.From, dashboard.To)
+	}
+	if dashboard.TransactionTotal.TransactionCount != 1 {
+		t.Fatalf("expected the backdated July transaction counted, got %+v", dashboard.TransactionTotal)
+	}
+}
+
+func TestReports_DashboardFinanceAndTransactionsMatchStandaloneReports(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+	item := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": item.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("sell: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	category := createExpenseCategory(t, adminToken, "Listrik")
+	createExpenseAPI(t, adminToken, validExpenseBody(category.ID, map[string]any{"amount": 200000}))
+
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("dashboard: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var dashboard dashboardDTO
+	decodeData(t, resp, &dashboard)
+
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance?from="+dashboard.From+"&to="+dashboard.To, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("finance: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var finance financeReportDTO
+	decodeData(t, resp, &finance)
+	if dashboard.Finance.GrossProfit != finance.GrossProfit || dashboard.Finance.TotalExpenses != finance.TotalExpenses || dashboard.Finance.NetProfit != finance.NetProfit {
+		t.Fatalf("expected dashboard finance to match standalone report, got dashboard=%+v standalone=%+v", dashboard.Finance, finance)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/transactions?from="+dashboard.From+"&to="+dashboard.To, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("transactions: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var txReport transactionReportDTO
+	decodeData(t, resp, &txReport)
+	if dashboard.TransactionTotal != txReport.Total {
+		t.Fatalf("expected dashboard transaction_total to match standalone report, got dashboard=%+v standalone=%+v", dashboard.TransactionTotal, txReport.Total)
+	}
+}
+
+func TestReports_DashboardLowStockItemsOnly(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	lowStockProduct := stockItemFixtureProduct(t, adminToken)
+	createStockItemAPI(t, adminToken, lowStockProduct.ID, validStockItemBody(map[string]any{"serial_number": "DASH-LOW-1"}))
+
+	category := createCategory(t, adminToken, "Cincin")
+	brand := createBrand(t, adminToken, "UBS")
+	plentyProduct := createProduct(t, adminToken, "Cincin Emas 5gr", category.ID, brand.ID, 5)
+	for i := 0; i < 10; i++ {
+		createStockItemAPI(t, adminToken, plentyProduct.ID, validStockItemBody(map[string]any{"serial_number": "DASH-PLENTY-" + string(rune('A'+i))}))
+	}
+
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/dashboard?threshold=5", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var dashboard dashboardDTO
+	decodeData(t, resp, &dashboard)
+
+	if dashboard.LowStockThreshold != 5 {
+		t.Fatalf("expected threshold=5, got %d", dashboard.LowStockThreshold)
+	}
+	foundLow, foundPlenty := false, false
+	for _, item := range dashboard.LowStockItems {
+		if item.Product.ID == lowStockProduct.ID {
+			foundLow = true
+		}
+		if item.Product.ID == plentyProduct.ID {
+			foundPlenty = true
+		}
+	}
+	if !foundLow {
+		t.Fatalf("expected the low-stock product to appear, got %+v", dashboard.LowStockItems)
+	}
+	if foundPlenty {
+		t.Fatalf("expected the well-stocked product excluded from low_stock_items, got %+v", dashboard.LowStockItems)
+	}
+}
+
+func TestReports_DashboardPendingPurchaseOrders(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	supplier := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
+
+	pendingPO := createPurchaseOrder(t, adminToken, supplier.ID, []map[string]any{
+		{"product_id": product.ID, "quantity": 1, "purchase_price": 800000},
+	})
+
+	cancelledPO := createPurchaseOrder(t, adminToken, supplier.ID, []map[string]any{
+		{"product_id": product.ID, "quantity": 1, "purchase_price": 800000},
+	})
+	status, resp := doRequest(t, http.MethodPost, "/api/purchase-orders/"+cancelledPO.ID+"/cancel", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("cancel: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var dashboard dashboardDTO
+	decodeData(t, resp, &dashboard)
+
+	if dashboard.PendingPurchaseOrdersTotal != 1 || len(dashboard.PendingPurchaseOrders) != 1 {
+		t.Fatalf("expected exactly 1 pending PO (cancelled one excluded), got total=%d items=%+v",
+			dashboard.PendingPurchaseOrdersTotal, dashboard.PendingPurchaseOrders)
+	}
+	if dashboard.PendingPurchaseOrders[0].ID != pendingPO.ID || dashboard.PendingPurchaseOrders[0].POCode != pendingPO.POCode {
+		t.Fatalf("expected the still-pending PO, got %+v", dashboard.PendingPurchaseOrders[0])
+	}
+}
+
+func TestReports_DashboardPendingPurchaseOrdersCapAndTotal(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	supplier := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
+
+	for i := 0; i < 7; i++ {
+		createPurchaseOrder(t, adminToken, supplier.ID, []map[string]any{
+			{"product_id": product.ID, "quantity": 1, "purchase_price": 800000},
+		})
+	}
+
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/dashboard?pending_limit=3", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var dashboard dashboardDTO
+	decodeData(t, resp, &dashboard)
+
+	if len(dashboard.PendingPurchaseOrders) != 3 {
+		t.Fatalf("expected 3 items capped by pending_limit, got %d", len(dashboard.PendingPurchaseOrders))
+	}
+	if dashboard.PendingPurchaseOrdersTotal != 7 {
+		t.Fatalf("expected total=7 (true count beyond the cap), got %d", dashboard.PendingPurchaseOrdersTotal)
 	}
 }

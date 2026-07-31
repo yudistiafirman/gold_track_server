@@ -143,6 +143,7 @@ func NewRouter(
 					r.Get("/transactions", reportHandler.Transactions)
 					r.Get("/stock", reportHandler.Stock)
 					r.Get("/finance", reportHandler.Finance)
+					r.Get("/dashboard", reportHandler.Dashboard)
 				})
 			})
 		})

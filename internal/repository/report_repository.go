@@ -57,6 +57,16 @@ type ExpenseCategoryBreakdown struct {
 	TotalAmount      float64
 }
 
+// PendingPurchaseOrder is one row of the dashboard's "awaiting receipt"
+// list — POs still status = BELUM_DITERIMA.
+type PendingPurchaseOrder struct {
+	PublicID     string
+	POCode       string
+	SupplierName string
+	TotalAmount  float64
+	CreatedAt    time.Time
+}
+
 type ReportRepository interface {
 	// TransactionSummary groups transactions by type within the filtered
 	// date range.
@@ -70,6 +80,10 @@ type ReportRepository interface {
 	// ExpensesByCategory groups expenses by category within the filtered
 	// date range.
 	ExpensesByCategory(ctx context.Context, dateFrom, dateTo *time.Time) ([]ExpenseCategoryBreakdown, error)
+	// PendingPurchaseOrders returns the most recent `limit` purchase
+	// orders still awaiting receipt, newest first, plus the total count of
+	// all such POs (may exceed len(items) if there are more than limit).
+	PendingPurchaseOrders(ctx context.Context, limit int) ([]PendingPurchaseOrder, int, error)
 }
 
 type reportRepository struct {
@@ -252,4 +266,38 @@ func (r *reportRepository) ExpensesByCategory(ctx context.Context, dateFrom, dat
 		return nil, fmt.Errorf("summarize expenses by category: %w", err)
 	}
 	return breakdown, nil
+}
+
+func (r *reportRepository) PendingPurchaseOrders(ctx context.Context, limit int) ([]PendingPurchaseOrder, int, error) {
+	var total int
+	if err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM purchase_orders WHERE status = 'BELUM_DITERIMA'`).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count pending purchase orders: %w", err)
+	}
+
+	const listQuery = `
+		SELECT po.public_id::text, po.po_code, s.name, po.total_amount::float8, po.created_at
+		FROM purchase_orders po
+		JOIN suppliers s ON s.id = po.supplier_id
+		WHERE po.status = 'BELUM_DITERIMA'
+		ORDER BY po.created_at DESC
+		LIMIT $1
+	`
+	rows, err := r.db.Query(ctx, listQuery, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list pending purchase orders: %w", err)
+	}
+	defer rows.Close()
+
+	var pending []PendingPurchaseOrder
+	for rows.Next() {
+		var p PendingPurchaseOrder
+		if err := rows.Scan(&p.PublicID, &p.POCode, &p.SupplierName, &p.TotalAmount, &p.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("scan pending purchase order row: %w", err)
+		}
+		pending = append(pending, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("list pending purchase orders: %w", err)
+	}
+	return pending, total, nil
 }
