@@ -26,6 +26,7 @@ func NewRouter(
 	userHandler *UserHandler,
 	categoryHandler *CategoryHandler,
 	brandHandler *BrandHandler,
+	productHandler *ProductHandler,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -70,6 +71,7 @@ func NewRouter(
 					r.Put("/{id}", brandHandler.Update)
 					r.Delete("/{id}", brandHandler.Delete)
 				})
+				r.Post("/products", productHandler.Create)
 			})
 		})
 	})

@@ -69,7 +69,8 @@ Urutan file (`000001`…`000016`) mengikuti dependency FK: `users` → `supplier
 `customers` / `expense_categories` → `products` / `gold_prices` → `purchase_orders` →
 `purchase_order_items` → `stock_items` → `transactions` → `transaction_items` →
 `expenses` → `settings` → `stock_opnames` → `stock_opname_items` → `token_blacklist`.
-`000017` (`categories`) dan `000018` (`brands`) berdiri sendiri (belum di-FK dari `products`).
+`000017` (`categories`) dan `000018` (`brands`) berdiri sendiri, lalu `000019` meng-ALTER
+`products` supaya `category_id`/`brand_id` FK ke keduanya (ganti kolom `category`/`brand` lama).
 
 Menambah migrasi baru: buat pasangan file
 `migrations/{next_number}_{deskripsi}.up.sql` dan `.down.sql`.
@@ -142,6 +143,57 @@ DELETE /api/users/{id}   # soft delete (is_active=false)             -> 200 / 40
 `{id}` di URL adalah `public_id` (UUID, contoh `097bbdc9-6e81-4af1-a167-705f2970a30b`), bukan
 angka sekuensial — format lain langsung ditolak 400 sebelum sempat query ke DB.
 
+Contoh response `POST /api/users` (201):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "097bbdc9-6e81-4af1-a167-705f2970a30b",
+    "name": "Kasir Baru",
+    "email": "kasir-baru@goldtrack.local",
+    "role": "KASIR",
+    "is_active": true,
+    "last_login_at": null,
+    "created_at": "2026-07-31T09:00:00Z",
+    "updated_at": "2026-07-31T09:00:00Z"
+  }
+}
+```
+
+Contoh response `GET /api/users` (200) — array objek yang sama:
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "097bbdc9-6e81-4af1-a167-705f2970a30b",
+      "name": "Kasir Baru",
+      "email": "kasir-baru@goldtrack.local",
+      "role": "KASIR",
+      "is_active": true,
+      "last_login_at": null,
+      "created_at": "2026-07-31T09:00:00Z",
+      "updated_at": "2026-07-31T09:00:00Z"
+    }
+  ]
+}
+```
+
+Contoh response error:
+```json
+// 403 — role selain SUPER_ADMIN
+{"success":false,"error":{"code":"FORBIDDEN","message":"Anda tidak memiliki akses untuk aksi ini"}}
+
+// 404 — public_id valid tapi tidak ada
+{"success":false,"error":{"code":"NOT_FOUND","message":"user tidak ditemukan"}}
+
+// 409 — email sudah dipakai
+{"success":false,"error":{"code":"CONFLICT","message":"email sudah dipakai"}}
+
+// 400 — {id} bukan format UUID
+{"success":false,"error":{"code":"BAD_REQUEST","message":"id tidak valid"}}
+```
+
 Catatan:
 - `password` di response **tidak pernah** dikembalikan.
 - `email` unik — konflik → 409.
@@ -170,6 +222,53 @@ PUT    /api/brands/{id}        # { name, is_active }           -> 200 / 404 / 40
 DELETE /api/brands/{id}        # soft delete (is_active=false) -> 200 / 404
 ```
 
+Contoh response `POST /api/categories` (201) — bentuk `brands` identik, cuma nama resource-nya beda:
+```json
+{
+  "success": true,
+  "data": {
+    "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "name": "Batangan",
+    "is_active": true,
+    "created_at": "2026-07-31T09:00:00Z",
+    "updated_at": "2026-07-31T09:00:00Z"
+  }
+}
+```
+
+Contoh response `GET /api/categories` (200) — array objek yang sama:
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "name": "Batangan",
+      "is_active": true,
+      "created_at": "2026-07-31T09:00:00Z",
+      "updated_at": "2026-07-31T09:00:00Z"
+    }
+  ]
+}
+```
+
+Contoh response error (sama utk `/api/categories` maupun `/api/brands`):
+```json
+// 403 — role selain ADMIN/SUPER_ADMIN
+{"success":false,"error":{"code":"FORBIDDEN","message":"Anda tidak memiliki akses untuk aksi ini"}}
+
+// 404 — public_id valid tapi tidak ada
+{"success":false,"error":{"code":"NOT_FOUND","message":"kategori tidak ditemukan"}}
+// (brand: "brand tidak ditemukan")
+
+// 409 — name sudah dipakai (case-insensitive)
+{"success":false,"error":{"code":"CONFLICT","message":"nama kategori sudah dipakai"}}
+// (brand: "nama brand sudah dipakai")
+
+// 400 — {id} bukan format UUID
+{"success":false,"error":{"code":"BAD_REQUEST","message":"id tidak valid"}}
+```
+
 Catatan:
 - `{id}` juga `public_id` (UUID), sama seperti `/api/users`.
 - `name` unik **case-insensitive** (unique index di `lower(name)`) — "Antam" dan "antam"
@@ -177,8 +276,73 @@ Catatan:
   langsung dari `name` ini.
 - `DELETE` adalah **soft delete** (`is_active=false`), tidak ada guard "tidak bisa hapus diri
   sendiri" seperti di `/api/users` karena resource ini bukan akun.
-- Belum ada FK dari `products` ke tabel ini — `products.category`/`products.brand` masih
-  kolom lama (lihat migration `000005`); menyambungkannya adalah pekerjaan BE-201 berikutnya.
+- `products.category_id`/`products.brand_id` (migration `000019`) adalah FK ke tabel ini —
+  lihat `### POST /api/products` di bawah.
+
+### POST /api/products — create produk dengan SKU auto-generate (ADMIN & SUPER_ADMIN)
+
+```bash
+POST /api/products   # { name, category_id, brand_id, weight_gram, description? } -> 201
+```
+
+`category_id`/`brand_id` di body adalah `public_id` (UUID) dari `/api/categories`/`/api/brands` —
+klien harus create/pilih kategori & brand lewat endpoint itu dulu (dropdown/autocomplete FE).
+Kategori/brand yang sudah `is_active=false` ditolak (400) — tidak bisa dipakai bikin produk baru.
+
+**SKU auto-generate**, format `[KAT]-[BRAND]-[BERAT]-[URUT]`, dihitung di service layer
+(`internal/service/product_service.go`):
+- `[KAT]` / `[BRAND]` — 3 huruf/angka pertama nama kategori/brand, uppercase, karakter non-alfanumerik
+  dibuang. Contoh: "Batangan" → `BAT`, "Antam" → `ANT`.
+- `[BERAT]` — `weight_gram` apa adanya, trailing desimal nol dibuang (`10.000`→`10`, `10.500`→`10.5`).
+- `[URUT]` — jumlah produk yang sudah punya prefix `KAT-BRAND-BERAT-` yang sama, +1, zero-padded
+  3 digit (`001`, `002`, …). Dihitung + insert dalam **satu transaksi DB**
+  (`ProductRepository.CreateWithGeneratedSKU`), dengan retry (maks 5x) kalau ada race
+  concurrent-create yang kena unique constraint `uq_products_sku` — bukan cuma dihitung sekali lalu
+  percaya begitu saja.
+
+Contoh response `POST /api/products` (201):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f",
+    "name": "Emas Batangan 10gr",
+    "sku": "BAT-ANT-10-001",
+    "category_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "brand_id": "5c9e1a3b-8f2d-4a6e-9b1c-7d8e9f0a1b2c",
+    "weight_gram": 10,
+    "description": "Emas batangan Antam 10 gram",
+    "is_active": true,
+    "created_at": "2026-07-31T09:00:00Z",
+    "updated_at": "2026-07-31T09:00:00Z"
+  }
+}
+```
+Dua produk berikutnya dengan kombinasi kategori+brand+berat yang sama akan dapat
+`BAT-ANT-10-002`, `BAT-ANT-10-003`, dst.
+
+Contoh response error:
+```json
+// 403 — role selain ADMIN/SUPER_ADMIN
+{"success":false,"error":{"code":"FORBIDDEN","message":"Anda tidak memiliki akses untuk aksi ini"}}
+
+// 400 — field wajib kosong
+{"success":false,"error":{"code":"BAD_REQUEST","message":"name, category_id, dan brand_id wajib diisi"}}
+
+// 400 — weight_gram <= 0
+{"success":false,"error":{"code":"BAD_REQUEST","message":"weight_gram harus lebih besar dari 0"}}
+
+// 400 — category_id/brand_id merujuk ke resource yang is_active=false
+{"success":false,"error":{"code":"BAD_REQUEST","message":"kategori tidak aktif"}}
+
+// 404 — category_id/brand_id valid UUID tapi tidak ada
+{"success":false,"error":{"code":"NOT_FOUND","message":"kategori tidak ditemukan"}}
+```
+
+Catatan:
+- `created_by` diambil dari `claims.UserID` (JWT), bukan dari body — tidak bisa dipalsukan klien.
+- `is_active` selalu `true` saat create, tidak bisa di-set lewat body.
+- Scope BE-201 cuma `POST` — belum ada `GET`/`PUT`/`DELETE` untuk `/api/products` (ticket terpisah).
 
 ## Middleware JWT & role (internal/middleware/auth.go)
 
@@ -274,6 +438,15 @@ Dua lapis test:
 - Create dengan nama duplikat (termasuk beda case, mis. `"Koin"` vs `"koin"`) → 409
   (unique index case-insensitive di `lower(name)`)
 - Get dengan id bukan UUID → 400; UUID valid tapi tidak ada → 404
+
+**`products_test.go`** — `POST /api/products` (create only, ADMIN & SUPER_ADMIN, BE-201)
+- Tanpa token → 401; role KASIR → 403
+- Create dengan kategori "Batangan" + brand "Antam" + berat 10 → `sku == "BAT-ANT-10-001"`,
+  `is_active == true`, `category_id`/`brand_id` di response sama dengan yang dikirim
+- Dua create dengan kombinasi kategori+brand+berat identik → SKU kedua `...-002` (urut naik)
+- Field wajib kosong (`name`/`category_id`/`brand_id`) → 400; `weight_gram <= 0` → 400
+- `category_id`/`brand_id` UUID valid tapi tidak ada → 404
+- `category_id` merujuk kategori yang sudah `is_active=false` → 400
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta
