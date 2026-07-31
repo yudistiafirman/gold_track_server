@@ -24,6 +24,7 @@ func NewRouter(logger *slog.Logger, healthHandler *HealthHandler, authHandler *A
 
 	r.Route("/api", func(r chi.Router) {
 		r.Post("/auth/login", authHandler.Login)
+		r.Post("/auth/logout", authHandler.Logout)
 	})
 
 	return r

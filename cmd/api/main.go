@@ -41,7 +41,8 @@ func main() {
 	healthHandler := handler.NewHealthHandler(healthService)
 
 	userRepo := repository.NewUserRepository(dbPool)
-	authService := service.NewAuthService(userRepo, cfg.JWT.Secret, cfg.JWT.Expiry)
+	tokenBlacklistRepo := repository.NewTokenBlacklistRepository(dbPool)
+	authService := service.NewAuthService(userRepo, tokenBlacklistRepo, cfg.JWT.Secret, cfg.JWT.Expiry)
 	authHandler := handler.NewAuthHandler(authService)
 
 	router := handler.NewRouter(log, healthHandler, authHandler)

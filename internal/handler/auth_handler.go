@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -64,4 +65,33 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 			Role: result.User.Role,
 		},
 	})
+}
+
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	token, err := bearerToken(r)
+	if err != nil {
+		response.Error(w, apperror.Unauthorized("token tidak ditemukan", err))
+		return
+	}
+
+	if err := h.authService.Logout(r.Context(), token); err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, map[string]string{"message": "logout berhasil"})
+}
+
+func bearerToken(r *http.Request) (string, error) {
+	header := r.Header.Get("Authorization")
+	prefix := "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return "", errors.New("missing or malformed authorization header")
+	}
+
+	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	if token == "" {
+		return "", errors.New("empty bearer token")
+	}
+	return token, nil
 }

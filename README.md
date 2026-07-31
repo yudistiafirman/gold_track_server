@@ -89,8 +89,24 @@ sengaja disamakan supaya tidak membocorkan status akun):
 {"success":false,"error":{"code":"UNAUTHORIZED","message":"Email atau password salah"}}
 ```
 
-Token JWT (HS256) berisi `user_id`, `role`, `exp` (masa berlaku dari `JWT_EXPIRY`, default 24h),
+Token JWT (HS256) berisi `user_id`, `role`, `jti`, `exp` (masa berlaku dari `JWT_EXPIRY`, default 24h),
 ditandatangani dengan `JWT_SECRET`. `last_login_at` di-update setiap login sukses.
+
+### POST /api/auth/logout
+
+```bash
+curl -X POST http://localhost:8080/api/auth/logout \
+  -H "Authorization: Bearer <jwt>"
+```
+
+Sukses (200): `{"success":true,"data":{"message":"logout berhasil"}}`
+
+Karena JWT stateless, invalidasi beneran butuh blacklist sisi server: `jti` token
+disimpan di tabel `token_blacklist` sampai waktu expiry aslinya. Setiap request
+(termasuk logout berikutnya) yang bawa token dengan `jti` itu akan ditolak 401
+`"Token tidak valid atau sudah tidak berlaku"` — jadi token yang sama tidak bisa
+dipakai dua kali setelah logout. Request tanpa header `Authorization: Bearer <jwt>`
+yang valid juga ditolak 401.
 
 ## Konfigurasi (env)
 
