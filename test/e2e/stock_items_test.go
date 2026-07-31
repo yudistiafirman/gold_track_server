@@ -602,3 +602,116 @@ func TestStockItems_LabelNotFound(t *testing.T) {
 		t.Fatalf("expected 404, got %d (resp=%+v)", status, resp)
 	}
 }
+
+// --- BE-701/BE-703: barcode lookup ---
+
+type stockItemLookupDTO struct {
+	stockItemDTO
+	RequiresConfirmation bool `json:"requires_confirmation"`
+}
+
+func TestStockItems_LookupRequiresAuth(t *testing.T) {
+	resetDB(t)
+
+	status, _ := doRequest(t, http.MethodGet, "/api/stock-items/lookup?barcode=whatever", nil, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", status)
+	}
+}
+
+func TestStockItems_LookupFoundAvailable(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items/lookup?barcode="+created.Barcode, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var found stockItemLookupDTO
+	decodeData(t, resp, &found)
+	if found.Barcode != created.Barcode || found.Condition != "GOOD" || found.Product.ID != product.ID {
+		t.Fatalf("expected unit+product+condition, got %+v", found)
+	}
+}
+
+func TestStockItems_LookupNotFound(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items/lookup?barcode=NOPE-0000", nil, adminToken)
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestStockItems_LookupSoldConflict(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	markStockItemSold(t, created.ID)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items/lookup?barcode="+created.Barcode, nil, adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestStockItems_LookupRequiresConfirmationForBadConditionSell(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"condition": "BAD"}))
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items/lookup?barcode="+created.Barcode+"&type=SELL", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var found stockItemLookupDTO
+	decodeData(t, resp, &found)
+	if !found.RequiresConfirmation {
+		t.Fatal("expected requires_confirmation=true for BAD condition + type=SELL")
+	}
+}
+
+func TestStockItems_LookupNoConfirmationForSupplierType(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"condition": "BAD"}))
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items/lookup?barcode="+created.Barcode+"&type=SELL_SUPPLIER", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var found stockItemLookupDTO
+	decodeData(t, resp, &found)
+	if found.RequiresConfirmation {
+		t.Fatal("expected requires_confirmation=false for SELL_SUPPLIER")
+	}
+}
+
+func TestStockItems_LookupNoConfirmationWhenTypeOmitted(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"condition": "BAD"}))
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items/lookup?barcode="+created.Barcode, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var found stockItemLookupDTO
+	decodeData(t, resp, &found)
+	if found.RequiresConfirmation {
+		t.Fatal("expected requires_confirmation=false when type is omitted")
+	}
+}

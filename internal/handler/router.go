@@ -30,6 +30,7 @@ func NewRouter(
 	supplierHandler *SupplierHandler,
 	stockItemHandler *StockItemHandler,
 	customerHandler *CustomerHandler,
+	transactionHandler *TransactionHandler,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -50,8 +51,10 @@ func NewRouter(
 			r.Get("/products", productHandler.List)
 			r.Get("/products/{id}", productHandler.Get)
 			r.Get("/products/{productId}/stock-items", stockItemHandler.ListByProduct)
+			r.Get("/stock-items/lookup", stockItemHandler.Lookup)
 			r.Get("/stock-items/{id}", stockItemHandler.Get)
 			r.Get("/stock-items/{id}/label", stockItemHandler.GetLabel)
+			r.Post("/transactions", transactionHandler.Create)
 			r.Route("/customers", func(r chi.Router) {
 				r.Get("/", customerHandler.List)
 				r.Post("/", customerHandler.Create)

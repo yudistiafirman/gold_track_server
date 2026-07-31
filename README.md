@@ -593,6 +593,7 @@ Contoh response error:
 ```bash
 POST   /api/products/{productId}/stock-items   # tambah unit stok, barcode auto-generate      -> 201 (ADMIN & SUPER_ADMIN)
 GET    /api/products/{productId}/stock-items   # ?status=&condition=&search=&page=&limit=     -> 200 (semua role, token valid)
+GET    /api/stock-items/lookup                 # ?barcode=&type=  cari unit buat keranjang jual -> 200 / 404 / 409 (semua role, token valid)
 GET    /api/stock-items/{id}                   # detail unit lengkap (termasuk barcode)         -> 200 / 404 (semua role, token valid)
 GET    /api/stock-items/{id}/label             # data buat cetak label CODE128                  -> 200 / 404 (semua role, token valid)
 PUT    /api/stock-items/{id}                   # edit unit, barcode & product_id terkunci        -> 200 / 404 / 409 (ADMIN & SUPER_ADMIN)
@@ -626,6 +627,42 @@ DELETE /api/stock-items/{id}                   # HARD delete, hanya unit AVAILAB
   ulang label diperbolehkan, tidak difilter status.
 - `supplier_id`/`po_id` di luar scope saat ini — selalu `NULL` (belum ada resource purchase
   order, dan `supplier_id` belum diterima lewat body ini).
+
+#### GET /api/stock-items/lookup — cari unit via barcode (BE-701/BE-703)
+
+Dipakai kasir buat scan barcode fisik pas nambahin item ke keranjang jual. `?barcode=` wajib.
+`?type=` opsional (`SELL` atau `SELL_SUPPLIER`) — kalau `type=SELL` dan unit `condition=BAD`,
+response punya `"requires_confirmation": true` supaya klien nampilin konfirmasi **sebelum** unit
+itu masuk keranjang. `type=SELL_SUPPLIER` atau `?type` dikosongkan → `requires_confirmation`
+selalu `false` (jual ke supplier tidak butuh konfirmasi kondisi). Barcode tidak ditemukan → 404;
+unit yang sudah `SOLD` → 409. Field `condition` selalu ada di response biar klien juga bisa decide
+sendiri kalau perlu.
+
+```bash
+GET /api/stock-items/lookup?barcode=BAT-ANT-10-001-0001&type=SELL
+```
+
+Contoh response (200):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
+    "product": { "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f", "name": "Emas Batangan 10gr" },
+    "barcode": "BAT-ANT-10-001-0001",
+    "serial_number": "SN-0001",
+    "condition": "BAD",
+    "purchase_price": 1000000,
+    "purchase_date": "2026-07-01",
+    "status": "AVAILABLE",
+    "sold_at": null,
+    "notes": "",
+    "created_at": "2026-07-31T09:00:00Z",
+    "updated_at": "2026-07-31T09:00:00Z",
+    "requires_confirmation": true
+  }
+}
+```
 
 Contoh response `POST /api/products/{productId}/stock-items` (201):
 ```json
@@ -682,6 +719,105 @@ Contoh response error:
 // 404 — {productId} atau {id} tidak ditemukan
 {"success":false,"error":{"code":"NOT_FOUND","message":"produk tidak ditemukan"}}
 {"success":false,"error":{"code":"NOT_FOUND","message":"unit stok tidak ditemukan"}}
+```
+
+### POST /api/transactions — checkout penjualan (BE-702/BE-703)
+
+```bash
+POST /api/transactions   # semua role, token valid
+```
+```json
+{
+  "type": "SELL",
+  "customer_id": "<public_id customer, wajib kalau type=SELL>",
+  "supplier_id": "<public_id supplier, wajib kalau type=SELL_SUPPLIER>",
+  "payment_method": "CASH",
+  "payment_ref": "",
+  "notes": "",
+  "items": [
+    { "stock_item_id": "<public_id unit>", "price_total": 1500000, "confirmed": false }
+  ]
+}
+```
+
+Satu transaksi bisa berisi banyak `items`, tiap item **harga negonya sendiri-sendiri**
+(`price_total`) — bukan dihitung dari harga per gram. `price_per_gram` di response adalah
+turunan (`price_total ÷ weight_gram`), dihitung server buat kebutuhan laporan, bukan input.
+
+**Atomik & aman dari race condition**: seluruh proses (lock tiap unit, validasi, hitung
+`transaction_code`, insert header + items, ubah status unit) jalan dalam **satu transaksi DB**.
+Tiap `stock_items` yang direferensikan di-lock (`SELECT ... FOR UPDATE`) dan dicek ulang
+statusnya di dalam lock itu — jadi kalau dua request nyoba jual unit yang sama nyaris bersamaan,
+yang kedua pasti dapat 409, bukan ikut lolos gara-gara keduanya sempat lihat status `AVAILABLE`
+sebelum salah satu commit (diverifikasi test `TestTransactions_CreateConcurrentDoubleSellOnlyOneWins`,
+dua goroutine nembak unit yang sama bersamaan → persis satu 201 dan satu 409, berulang kali).
+
+**Aturan per `type`**:
+- `SELL` → `customer_id` wajib, `supplier_id` harus kosong.
+- `SELL_SUPPLIER` → `supplier_id` wajib, `customer_id` harus kosong.
+- `BUY` **tidak** didukung endpoint ini (nilai ketiga di kolom `type`, buat ticket lain nanti).
+
+**Konfirmasi kondisi BAD (BE-703)**: kalau `type=SELL` dan unit yang direferensikan
+`condition=BAD`, item itu wajib `"confirmed": true` — kalau tidak, seluruh transaksi ditolak
+(409), bukan cuma item itu (semua-atau-tidak-sama-sekali, sama seperti prinsip atomik di atas).
+`SELL_SUPPLIER` tidak pernah butuh `confirmed`, walau unitnya `BAD`. Cek dulu lewat
+`GET /api/stock-items/lookup?barcode=...&type=SELL` buat tau butuh konfirmasi atau tidak
+sebelum checkout — tapi validasi ini tetap dipaksakan lagi di server saat `POST`, klien tidak
+pernah dipercaya begitu saja buat hal finansial begini.
+
+`transaction_code` format `TRX-YYYYMMDD-XXXX` (urut 4 digit per hari, mis. `TRX-20260731-0001`,
+`...-0002`), dihitung + insert dalam transaksi yang sama dengan retry (maks 5x) kalau kena race
+di constraint unique-nya — pola yang sama dengan `sku` produk dan `barcode` unit stok.
+
+Setiap unit yang berhasil terjual otomatis jadi `status=SOLD` + `sold_at` terisi (tidak bisa
+di-`PUT`/`DELETE` lagi setelahnya — lihat guard di section stock-items di atas).
+
+Response **tidak pernah menyertakan `cogs`** (harga pokok/beli unit) — itu data margin toko,
+sengaja tidak diekspos ke response checkout yang kemungkinan dilihat kasir.
+
+Contoh response (201):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "2b3c4d5e-6f70-8901-bcde-f01234567890",
+    "transaction_code": "TRX-20260731-0001",
+    "type": "SELL",
+    "total_amount": 1500000,
+    "total_weight": 10,
+    "payment_method": "CASH",
+    "status": "COMPLETED",
+    "items": [
+      {
+        "id": "3c4d5e6f-7081-9012-cdef-012345678901",
+        "product_name": "Emas Batangan 10gr",
+        "weight_gram": 10,
+        "price_per_gram": 150000,
+        "price_total": 1500000
+      }
+    ],
+    "created_at": "2026-07-31T09:00:00Z",
+    "completed_at": "2026-07-31T09:00:00Z"
+  }
+}
+```
+
+Contoh response error:
+```json
+// 400 — type bukan SELL/SELL_SUPPLIER, atau customer_id/supplier_id tidak sesuai type
+{"success":false,"error":{"code":"BAD_REQUEST","message":"type SELL wajib mengisi customer_id dan tidak boleh mengisi supplier_id"}}
+
+// 400 — payment_method invalid, items kosong, atau price_total <= 0
+{"success":false,"error":{"code":"BAD_REQUEST","message":"payment_method harus CASH, TRANSFER, atau QRIS"}}
+
+// 404 — customer_id/supplier_id/stock_item_id tidak ditemukan
+{"success":false,"error":{"code":"NOT_FOUND","message":"pelanggan tidak ditemukan"}}
+
+// 409 — unit sudah SOLD (termasuk hasil race FOR UPDATE)
+{"success":false,"error":{"code":"CONFLICT","message":"unit sudah terjual (SOLD), tidak bisa dijual"}}
+
+// 409 — unit BAD dijual ke pelanggan tanpa confirmed=true
+{"success":false,"error":{"code":"CONFLICT","message":"unit kondisi BAD perlu konfirmasi (confirmed=true) untuk dijual ke pelanggan"}}
 ```
 
 ## Middleware JWT & role (internal/middleware/auth.go)
@@ -864,6 +1000,33 @@ Dua lapis test:
 - List: `?search=` cocok ke `name` **atau** `phone`; `?limit=&page=` paginasi dengan benar
 - List: pelanggan yang diarsipkan **tetap** muncul di list (sama seperti `/api/suppliers`)
 - Get dengan id bukan UUID → 400; UUID valid tapi tidak ada → 404
+
+**`stock_items_test.go`** (tambahan) — `GET /api/stock-items/lookup` (BE-701/BE-703)
+- Tanpa token → 401
+- Barcode ditemukan & `AVAILABLE` → 200, response berisi unit + produk + `condition`
+- Barcode tidak ditemukan → 404; unit sudah `SOLD` → 409
+- `?type=SELL` + unit `condition=BAD` → `requires_confirmation: true`
+- `?type=SELL_SUPPLIER` + unit `condition=BAD` → `requires_confirmation: false`
+- `?type` dikosongkan + unit `condition=BAD` → `requires_confirmation: false`
+
+**`transactions_test.go`** — `POST /api/transactions` (BE-702/BE-703)
+- Tanpa token → 401
+- Jual ke pelanggan (`type=SELL`) → 201, `transaction_code` format `TRX-YYYYMMDD-0001`,
+  `total_amount`/`total_weight` terjumlah benar, `items[].price_per_gram == price_total / weight_gram`,
+  unit yang terjual jadi `status=SOLD` (dicek lewat `GET /api/stock-items/{id}`)
+- `type=SELL_SUPPLIER` tanpa `supplier_id` → 400; isi `customer_id` alih-alih `supplier_id` → 400
+- `type=SELL` tanpa `customer_id` → 400
+- Dua transaksi di hari yang sama → `transaction_code` urut naik (`-0001`, `-0002`)
+- Jual unit yang sama dua kali (request kedua) → 409, transaksi pertama tidak terganggu
+- **Dua request konkuren menjual unit yang sama** (goroutine, bukan raw `doRequest` di dalam
+  goroutine — `t.Fatalf` tidak boleh dipanggil dari goroutine selain punya test) → tepat satu
+  `201` dan satu `409`, diverifikasi berulang (`-count=5`) — bukti `FOR UPDATE` beneran
+  menyerialisasi, bukan sekadar cek-lalu-eksekusi yang rawan race
+- Unit `condition=BAD` dijual ke pelanggan tanpa `confirmed` → 409; dengan `confirmed: true` → 201
+- Unit `condition=BAD` dijual ke supplier (`SELL_SUPPLIER`) tanpa `confirmed` → tetap 201 (guard
+  konfirmasi cuma berlaku buat `SELL`)
+- `payment_method` invalid → 400; `items` kosong → 400
+- Response tidak pernah mengandung field `cogs` di mana pun (cek raw JSON)
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta

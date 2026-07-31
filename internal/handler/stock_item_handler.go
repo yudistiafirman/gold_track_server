@@ -62,6 +62,11 @@ type stockItemListResponse struct {
 	Pagination paginationResponse  `json:"pagination"`
 }
 
+type stockItemLookupResponse struct {
+	stockItemResponse
+	RequiresConfirmation bool `json:"requires_confirmation"`
+}
+
 type stockItemLabelResponse struct {
 	Barcode      string  `json:"barcode"`
 	ProductName  string  `json:"product_name"`
@@ -150,6 +155,29 @@ func (h *StockItemHandler) ListByProduct(w http.ResponseWriter, r *http.Request)
 			Total:      result.Total,
 			TotalPages: result.TotalPages,
 		},
+	})
+}
+
+// Lookup finds a stock item by its physical barcode (BE-701), for adding to
+// a sale cart. ?type= is optional (BE-703) — when it's "SELL", a BAD
+// condition unit sets requires_confirmation so the client can prompt
+// before adding it to the cart.
+func (h *StockItemHandler) Lookup(w http.ResponseWriter, r *http.Request) {
+	barcode := r.URL.Query().Get("barcode")
+	if barcode == "" {
+		response.Error(w, apperror.BadRequest("barcode wajib diisi", nil))
+		return
+	}
+
+	result, requiresConfirmation, err := h.stockItemService.Lookup(r.Context(), barcode, r.URL.Query().Get("type"))
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, stockItemLookupResponse{
+		stockItemResponse:    toStockItemResponse(result),
+		RequiresConfirmation: requiresConfirmation,
 	})
 }
 

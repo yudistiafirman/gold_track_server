@@ -101,6 +101,12 @@ type StockItemService interface {
 	GetLabel(ctx context.Context, publicID string) (StockItemLabel, error)
 	Update(ctx context.Context, input UpdateStockItemInput) (StockItemSummary, error)
 	Delete(ctx context.Context, publicID string) error
+	// Lookup finds a stock item by its physical barcode (BE-701). If
+	// transactionType is "SELL" and the unit's condition is BAD, the
+	// returned flag signals the client should show a confirmation prompt
+	// before adding it to the cart (BE-703) — SELL_SUPPLIER or an omitted
+	// type never requires confirmation.
+	Lookup(ctx context.Context, barcode, transactionType string) (StockItemSummary, bool, error)
 }
 
 type stockItemService struct {
@@ -308,6 +314,22 @@ func (s *stockItemService) Delete(ctx context.Context, publicID string) error {
 		return apperror.Internal("failed to fetch stock item", err)
 	}
 	return apperror.Conflict("unit sudah terjual (SOLD), tidak bisa dihapus", nil)
+}
+
+func (s *stockItemService) Lookup(ctx context.Context, barcode, transactionType string) (StockItemSummary, bool, error) {
+	item, err := s.stockItemRepo.FindByBarcode(ctx, barcode)
+	if err != nil {
+		if errors.Is(err, repository.ErrStockItemNotFound) {
+			return StockItemSummary{}, false, apperror.NotFound("barcode tidak ditemukan", nil)
+		}
+		return StockItemSummary{}, false, apperror.Internal("failed to fetch stock item", err)
+	}
+	if item.Status == "SOLD" {
+		return StockItemSummary{}, false, apperror.Conflict("unit sudah terjual (SOLD)", nil)
+	}
+
+	requiresConfirmation := transactionType == "SELL" && item.Condition == "BAD"
+	return toStockItemSummaryFromRefs(item), requiresConfirmation, nil
 }
 
 // validateStockItemFields returns the parsed purchase date on success.

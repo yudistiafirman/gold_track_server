@@ -65,6 +65,9 @@ type StockItemRepository interface {
 	CreateWithGeneratedBarcode(ctx context.Context, s *model.StockItem, barcodePrefix string) (*model.StockItem, error)
 	// FindByPublicID looks up a stock item regardless of status.
 	FindByPublicID(ctx context.Context, publicID string) (*StockItemWithRefs, error)
+	// FindByBarcode looks up a stock item regardless of status — mirrors
+	// FindByPublicID but keyed by the physical barcode instead of public_id.
+	FindByBarcode(ctx context.Context, barcode string) (*StockItemWithRefs, error)
 	// ListByProduct returns stock items for a single product matching filter,
 	// along with the total count ignoring pagination.
 	ListByProduct(ctx context.Context, productID int64, filter StockItemFilter) ([]StockItemWithRefs, int, error)
@@ -153,6 +156,19 @@ func (r *stockItemRepository) FindByPublicID(ctx context.Context, publicID strin
 			return nil, ErrStockItemNotFound
 		}
 		return nil, fmt.Errorf("find stock item by public id: %w", err)
+	}
+	return &s, nil
+}
+
+func (r *stockItemRepository) FindByBarcode(ctx context.Context, barcode string) (*StockItemWithRefs, error) {
+	query := `SELECT ` + stockItemWithRefsColumns + stockItemWithRefsFrom + `WHERE si.barcode = $1`
+
+	var s StockItemWithRefs
+	if err := scanStockItemWithRefs(r.db.QueryRow(ctx, query, barcode), &s); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrStockItemNotFound
+		}
+		return nil, fmt.Errorf("find stock item by barcode: %w", err)
 	}
 	return &s, nil
 }
