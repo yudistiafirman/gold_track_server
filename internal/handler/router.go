@@ -32,6 +32,7 @@ func NewRouter(
 	customerHandler *CustomerHandler,
 	transactionHandler *TransactionHandler,
 	purchaseOrderHandler *PurchaseOrderHandler,
+	stockOpnameHandler *StockOpnameHandler,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -113,6 +114,12 @@ func NewRouter(
 					r.Get("/{id}", purchaseOrderHandler.Get)
 					r.Post("/{id}/receive", purchaseOrderHandler.Receive)
 					r.Post("/{id}/cancel", purchaseOrderHandler.Cancel)
+				})
+				r.Route("/stock-opnames", func(r chi.Router) {
+					r.Post("/", stockOpnameHandler.Create)
+					r.Get("/{id}", stockOpnameHandler.Get)
+					r.Post("/{id}/scan", stockOpnameHandler.Scan)
+					r.Post("/{id}/complete", stockOpnameHandler.Complete)
 				})
 			})
 		})

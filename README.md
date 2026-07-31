@@ -1123,6 +1123,103 @@ Contoh response error:
 {"success":false,"error":{"code":"CONFLICT","message":"PO sudah diterima atau dibatalkan, tidak bisa diterima lagi"}}
 ```
 
+### /api/stock-opnames — stock opname / cocok stok fisik (BE-1101/BE-1102/BE-1103, ADMIN & SUPER_ADMIN)
+
+```bash
+POST /api/stock-opnames               # { notes? }                    -> 201
+GET  /api/stock-opnames/{id}          # detail + items[] + summary     -> 200 / 404
+POST /api/stock-opnames/{id}/scan     # { barcode }                    -> 200 / 404 / 409
+POST /api/stock-opnames/{id}/complete # tanpa body                     -> 200 / 404 / 409
+```
+
+Sama seperti `/api/purchase-orders`: **cuma** `ADMIN`/`SUPER_ADMIN`, tidak ada akses `KASIR` —
+semua tiga ticket-nya eksplisit "Sebagai Admin". Tidak ada `GET /api/stock-opnames` (list) — belum
+diminta ticket manapun di batch ini.
+
+**Alur**: `POST` bikin sesi baru `status=IN_PROGRESS`, `opname_code` format `OPN-YYYYMMDD-XXXX`
+(pola generate yang sama dengan `sku`/`barcode`/`transaction_code`/`po_code`), `opname_date` diisi
+`CURRENT_DATE` di level DB (bukan input klien).
+
+`POST /{id}/scan` mencatat satu kali scan barcode fisik ke `stock_opname_items`:
+- Barcode dikenal & `stock_items.status=AVAILABLE` → `system_status=AVAILABLE`,
+  `physical_status=FOUND`, `result=MATCH`.
+- Barcode dikenal tapi `stock_items.status=SOLD` (unit yang menurut sistem sudah tidak seharusnya
+  ada secara fisik, tapi ternyata discan) → `result=UNEXPECTED`.
+- **Barcode sama sekali tidak dikenal** (tidak ada baris `stock_items` yang cocok) → **ditolak
+  404** (`"barcode tidak ditemukan"`, pesan yang sama dengan `GET /stock-items/lookup`), **bukan**
+  dicatat sebagai `UNEXPECTED` — `stock_opname_items.stock_item_id` adalah FK `NOT NULL`, jadi unit
+  yang benar-benar tidak dikenal sistem memang tidak bisa direkam sebagai baris di tabel ini.
+- Unit yang sama discan dua kali dalam satu sesi → 409 (`"unit sudah discan di sesi ini"`) —
+  dicegah eksplisit di level repository (tidak ada unique constraint di kolom ini), supaya tidak
+  dobel hitung.
+- Scan terhadap sesi yang bukan `IN_PROGRESS` (sudah `COMPLETED`) → 409. Sesi `{id}` tidak
+  ditemukan → 404. `barcode` kosong → 400.
+
+Response `scan` cuma item yang baru discan (bukan seluruh sesi) — kasir/admin yang lagi scan satu
+per satu butuh feedback instan buat unit itu saja, bukan re-fetch semua item yang sudah discan.
+
+`POST /{id}/complete` menutup sesi: tiap unit `stock_items.status=AVAILABLE` yang **belum pernah
+discan** di sesi ini otomatis dapat baris `system_status=AVAILABLE`, `physical_status=NOT_FOUND`,
+`result=MISSING` (satu `INSERT ... SELECT ... WHERE NOT EXISTS` atomik, bukan loop per unit), lalu
+`status` sesi jadi `COMPLETED`. Sesi yang sudah `COMPLETED` di-complete lagi → 409; setelah
+`COMPLETED`, `scan` juga otomatis ditolak 409 (guard yang sama). Baik `scan` maupun `complete`
+mengunci baris `stock_opnames` (`FOR UPDATE`) dalam transaksi yang sama dengan pengecekan status +
+tulisan datanya — pola yang sama dengan `receive` PO (BE-903) — supaya scan tidak bisa balapan
+dengan complete yang konkuren.
+
+`GET /{id}` (dipakai juga sebagai response `POST`/`scan`/`complete`) selalu menyertakan `summary`
+(`{match, missing, unexpected}`, dihitung dari `items[]` yang sudah di-fetch, bukan query terpisah)
+dan `items[]` (barcode/nama produk di-join dari `stock_items`/`products`, sama pola "list/detail
+sertakan nama, bukan FK mentah" seperti `StockItemWithRefs`/`PurchaseOrderWithSupplier`).
+
+Contoh response `POST /api/stock-opnames/{id}/complete` (200):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "7a8b9c0d-1e2f-3456-7890-abcdef123456",
+    "opname_code": "OPN-20260731-0001",
+    "opname_date": "2026-07-31",
+    "status": "COMPLETED",
+    "notes": "",
+    "items": [
+      {
+        "id": "8b9c0d1e-2f34-5678-90ab-cdef12345678",
+        "stock_item_id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
+        "barcode": "BAT-ANT-10-001-0001",
+        "product_name": "Emas Batangan 10gr",
+        "system_status": "AVAILABLE",
+        "physical_status": "FOUND",
+        "result": "MATCH"
+      },
+      {
+        "id": "9c0d1e2f-3456-7890-abcd-ef1234567890",
+        "stock_item_id": "2b3c4d5e-6f78-9012-bcde-f12345678901",
+        "barcode": "BAT-ANT-10-001-0002",
+        "product_name": "Emas Batangan 10gr",
+        "system_status": "AVAILABLE",
+        "physical_status": "NOT_FOUND",
+        "result": "MISSING"
+      }
+    ],
+    "summary": { "match": 1, "missing": 1, "unexpected": 0 },
+    "created_at": "2026-07-31T09:00:00Z"
+  }
+}
+```
+
+Contoh response error:
+```json
+// 404 — barcode tidak dikenal sama sekali
+{"success":false,"error":{"code":"NOT_FOUND","message":"barcode tidak ditemukan"}}
+
+// 409 — unit yang sama discan dua kali dalam satu sesi
+{"success":false,"error":{"code":"CONFLICT","message":"unit sudah discan di sesi ini"}}
+
+// 409 — scan/complete terhadap sesi yang sudah COMPLETED
+{"success":false,"error":{"code":"CONFLICT","message":"sesi opname sudah selesai, tidak bisa discan lagi"}}
+```
+
 ## Middleware JWT & role (internal/middleware/auth.go)
 
 - `appmw.JWTAuth(authService)` — verifikasi Bearer token (signature, expiry, dan status
@@ -1393,6 +1490,24 @@ Dua lapis test:
   yang identik dengan panggilan pertama
 - Struk tanpa `settings` di-seed sama sekali → tetap 200, field `store` kosong (`""`), tidak error
 - `{id}` tidak ditemukan → 404; format id bukan UUID → 400
+
+**`stock_opnames_test.go`** — `/api/stock-opnames` (BE-1101/BE-1102/BE-1103)
+- Semua endpoint tanpa token → 401; role KASIR → 403 (sama seperti `/api/purchase-orders`, tidak
+  ada akses KASIR sama sekali)
+- `POST` create → 201, `opname_code` format `OPN-YYYYMMDD-0001`, `status=IN_PROGRESS`, `notes`
+  tersimpan, `items[]` masih kosong; dua sesi di hari yang sama → `opname_code` urut naik
+- `POST /{id}/scan` unit `AVAILABLE` yang dikenal → `result=MATCH`, `physical_status=FOUND`; unit
+  yang statusnya `SOLD` (di-set langsung lewat SQL fixture) → `result=UNEXPECTED`,
+  `system_status=SOLD`; barcode yang sama sekali tidak dikenal → 404; `barcode` kosong → 400; unit
+  yang sama discan dua kali dalam satu sesi → 409 (scan pertama tidak terganggu); sesi `{id}` tidak
+  ditemukan → 404; scan terhadap sesi yang sudah `COMPLETED` → 409
+- `POST /{id}/complete`: sesi dengan 2 unit `AVAILABLE` (1 discan, 1 tidak) → 200,
+  `summary={match:1,missing:1,unexpected:0}`, `status=COMPLETED`, `items[]` berisi kedua unit
+  (termasuk yang otomatis jadi `MISSING`); `GET /{id}` setelahnya menunjukkan hasil yang sama;
+  complete sesi yang sudah `COMPLETED` → 409; sesi tidak ditemukan → 404
+- `GET /{id}` tidak ditemukan → 404; format id bukan UUID → 400
+- Alur penuh (round trip lintas ketiga ticket): create → scan 2 dari 3 unit `AVAILABLE` →
+  complete → `summary={match:2,missing:1,unexpected:0}`
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta
