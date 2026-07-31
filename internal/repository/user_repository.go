@@ -24,6 +24,8 @@ var ErrEmailTaken = errors.New("email already in use")
 
 const uniqueViolationCode = "23505"
 
+const foreignKeyViolationCode = "23503"
+
 // userColumns are cast public_id::text so every scan target can be a plain
 // Go string, regardless of pgx's uuid type mapping.
 const userColumns = `id, public_id::text, name, email, password_hash, role, is_active, last_login_at, created_at, updated_at`
@@ -189,4 +191,12 @@ func isUniqueViolation(err error) bool {
 func isUniqueViolationOnConstraint(err error, constraint string) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode && pgErr.ConstraintName == constraint
+}
+
+// isForeignKeyViolation reports whether err is a foreign-key-violation —
+// used to detect "still referenced elsewhere" on a hard delete, rather than
+// pre-checking for references and racing a concurrent insert.
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolationCode
 }

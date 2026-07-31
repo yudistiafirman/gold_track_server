@@ -33,6 +33,8 @@ func NewRouter(
 	transactionHandler *TransactionHandler,
 	purchaseOrderHandler *PurchaseOrderHandler,
 	stockOpnameHandler *StockOpnameHandler,
+	expenseCategoryHandler *ExpenseCategoryHandler,
+	expenseHandler *ExpenseHandler,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -120,6 +122,20 @@ func NewRouter(
 					r.Get("/{id}", stockOpnameHandler.Get)
 					r.Post("/{id}/scan", stockOpnameHandler.Scan)
 					r.Post("/{id}/complete", stockOpnameHandler.Complete)
+				})
+				r.Route("/expense-categories", func(r chi.Router) {
+					r.Get("/", expenseCategoryHandler.List)
+					r.Post("/", expenseCategoryHandler.Create)
+					r.Get("/{id}", expenseCategoryHandler.Get)
+					r.Put("/{id}", expenseCategoryHandler.Update)
+					r.Delete("/{id}", expenseCategoryHandler.Delete)
+				})
+				r.Route("/expenses", func(r chi.Router) {
+					r.Get("/", expenseHandler.List)
+					r.Post("/", expenseHandler.Create)
+					r.Get("/{id}", expenseHandler.Get)
+					r.Put("/{id}", expenseHandler.Update)
+					r.Delete("/{id}", expenseHandler.Delete)
 				})
 			})
 		})

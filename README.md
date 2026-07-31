@@ -1220,6 +1220,70 @@ Contoh response error:
 {"success":false,"error":{"code":"CONFLICT","message":"sesi opname sudah selesai, tidak bisa discan lagi"}}
 ```
 
+### /api/expense-categories & /api/expenses — pengeluaran operasional (BE-1201/BE-1202, ADMIN & SUPER_ADMIN)
+
+```bash
+POST   /api/expense-categories        # { name }                                          -> 201
+GET    /api/expense-categories        # tanpa pagination, list flat                        -> 200
+GET    /api/expense-categories/{id}                                                        -> 200 / 404
+PUT    /api/expense-categories/{id}   # { name }                                           -> 200 / 404 / 409
+DELETE /api/expense-categories/{id}                                                        -> 200 / 404 / 409
+
+POST   /api/expenses                  # { category_id, amount, description?, expense_date } -> 201
+GET    /api/expenses                  # ?category_id=&date_from=&date_to=&page=&limit=      -> 200
+GET    /api/expenses/{id}                                                                   -> 200 / 404
+PUT    /api/expenses/{id}             # { category_id, amount, description?, expense_date } -> 200 / 404
+DELETE /api/expenses/{id}                                                                   -> 200 / 404
+```
+
+**Beda dari resource CRUD lain di codebase ini**: `expense_categories` dan `expenses` **tidak
+punya kolom `is_active` maupun `updated_at`** (migrasi `000004`/`000012`) — satu-satunya resource
+di seluruh backend ini tanpa soft-delete. `DELETE` di sini karenanya **hapus beneran** (hard
+delete), bukan nonaktifkan seperti `categories`/`brands`/`suppliers`/`customers`. `name` di
+`expense_categories` unik **case-sensitive** (`UNIQUE (name)` polos), beda dengan `categories`
+yang case-insensitive (`UNIQUE (lower(name))`) — jadi "Listrik" dan "listrik" dianggap dua nama
+berbeda di sini.
+
+`DELETE /api/expense-categories/{id}` ditolak `409` kalau kategori itu masih dipakai satu atau
+lebih `expenses` (`expenses.category_id` adalah FK `RESTRICT` ke `expense_categories`, jadi
+Postgres sendiri yang menegakkan integritasnya — bukan pre-check manual yang rawan race, error
+foreign-key-violation dari DB langsung ditangkap dan dipetakan ke 409).
+
+`amount`/`category_id`/`expense_date` di `POST`/`PUT /api/expenses` wajib diisi (`400` kalau
+kosong/invalid — bukan tier `422`, karena tier itu di codebase ini khusus validasi pembuatan unit
+stok fisik, bukan buat resource operasional seperti ini); `amount` juga harus `> 0`.
+`category_id` yang tidak ditemukan → `404`.
+
+`GET /api/expenses` filter periode & kategori (AC BE-1202): `?category_id=` (harus `public_id`
+kategori yang valid, 404 kalau tidak ada), `?date_from=&date_to=` (masing-masing independen,
+inklusif di kedua ujung — bisa isi salah satu saja buat rentang open-ended), format tanggal
+`YYYY-MM-DD` sama seperti `purchase_date` di `stock_items`. Urutan default: `expense_date`
+terbaru duluan.
+
+Contoh response `GET /api/expenses/{id}` (200):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "3f4a5b6c-7d8e-9f01-2345-6789abcdef01",
+    "category": { "id": "2e3f4a5b-6c7d-8e9f-0123-456789abcdef", "name": "Listrik" },
+    "amount": 500000,
+    "description": "Tagihan bulan Juli",
+    "expense_date": "2026-07-01",
+    "created_at": "2026-07-31T09:00:00Z"
+  }
+}
+```
+
+Contoh response error:
+```json
+// 409 — hapus kategori yang masih dipakai expense
+{"success":false,"error":{"code":"CONFLICT","message":"kategori masih dipakai oleh pengeluaran, tidak bisa dihapus"}}
+
+// 400 — field wajib expense kosong/invalid
+{"success":false,"error":{"code":"BAD_REQUEST","message":"expense_date wajib diisi"}}
+```
+
 ## Middleware JWT & role (internal/middleware/auth.go)
 
 - `appmw.JWTAuth(authService)` — verifikasi Bearer token (signature, expiry, dan status
@@ -1508,6 +1572,25 @@ Dua lapis test:
 - `GET /{id}` tidak ditemukan → 404; format id bukan UUID → 400
 - Alur penuh (round trip lintas ketiga ticket): create → scan 2 dari 3 unit `AVAILABLE` →
   complete → `summary={match:2,missing:1,unexpected:0}`
+
+**`expense_categories_test.go`** — `/api/expense-categories` (BE-1201)
+- Semua endpoint tanpa token → 401; role KASIR → 403
+- Create → 201; List/Get/Update round trip; `name` kosong → 400
+- Duplikat `name` (persis sama) → 409 saat create maupun update
+- Delete kategori yang tidak dipakai → 200, **beneran hilang** (`GET` setelahnya → 404, hard
+  delete — bukan `is_active=false` seperti `categories`/`brands`); delete kategori yang masih
+  dipakai satu `expense` → 409, kategori tetap ada setelahnya (delete tidak boleh separuh jalan)
+- Tidak ditemukan → 404 (get/update/delete); format id bukan UUID → 400
+
+**`expenses_test.go`** — `/api/expenses` (BE-1202)
+- Semua endpoint tanpa token → 401; role KASIR → 403
+- Create/Get/Update/Delete round trip (delete juga hard delete, `GET` setelahnya → 404)
+- `category_id`/`amount`/`expense_date` kosong → 400 masing-masing; `amount <= 0` → 400;
+  `expense_date` format salah → 400; `category_id` tidak ditemukan → 404
+- `GET` list `?category_id=` cuma mengembalikan pengeluaran kategori itu; `?date_from=&date_to=`
+  memfilter rentang tanggal dengan benar (termasuk batas inklusif di kedua ujung, dan rentang
+  open-ended kalau cuma salah satu diisi); `?page=&limit=` paginasi; `?category_id=` yang tidak
+  ditemukan → 404
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta
