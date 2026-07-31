@@ -279,11 +279,19 @@ Catatan:
 - `products.category_id`/`products.brand_id` (migration `000019`) adalah FK ke tabel ini —
   lihat `### POST /api/products` di bawah.
 
-### POST /api/products — create produk dengan SKU auto-generate (ADMIN & SUPER_ADMIN)
+### /api/products — katalog produk
 
 ```bash
-POST /api/products   # { name, category_id, brand_id, weight_gram, description? } -> 201
+POST   /api/products        # { name, category_id, brand_id, weight_gram, description? } -> 201 (ADMIN & SUPER_ADMIN)
+GET    /api/products        # ?search=&category_id=&brand_id=&page=&limit=          -> 200 (semua role, token valid)
+GET    /api/products/{id}   # detail lengkap, termasuk produk yang sudah diarsipkan -> 200 / 404 (semua role, token valid)
 ```
+
+`POST` dibatasi `ADMIN`/`SUPER_ADMIN` (role lain → 403); `GET` (list & detail) bisa diakses semua
+role selama tokennya valid — tidak ada `RequireRole` tambahan, cuma perlu login (lihat
+`internal/handler/router.go`: kedua route ini sengaja diletakkan di luar grup `RequireRole`).
+
+#### POST /api/products — create dengan SKU auto-generate
 
 `category_id`/`brand_id` di body adalah `public_id` (UUID) dari `/api/categories`/`/api/brands` —
 klien harus create/pilih kategori & brand lewat endpoint itu dulu (dropdown/autocomplete FE).
@@ -300,7 +308,8 @@ Kategori/brand yang sudah `is_active=false` ditolak (400) — tidak bisa dipakai
   concurrent-create yang kena unique constraint `uq_products_sku` — bukan cuma dihitung sekali lalu
   percaya begitu saja.
 
-Contoh response `POST /api/products` (201):
+Contoh response `POST /api/products` (201) — `category`/`brand` nested `{id, name}`, bukan UUID
+polos, supaya klien nggak perlu lookup terpisah buat nampilin namanya:
 ```json
 {
   "success": true,
@@ -308,8 +317,8 @@ Contoh response `POST /api/products` (201):
     "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f",
     "name": "Emas Batangan 10gr",
     "sku": "BAT-ANT-10-001",
-    "category_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-    "brand_id": "5c9e1a3b-8f2d-4a6e-9b1c-7d8e9f0a1b2c",
+    "category": { "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "name": "Batangan" },
+    "brand": { "id": "5c9e1a3b-8f2d-4a6e-9b1c-7d8e9f0a1b2c", "name": "Antam" },
     "weight_gram": 10,
     "description": "Emas batangan Antam 10 gram",
     "is_active": true,
@@ -321,28 +330,74 @@ Contoh response `POST /api/products` (201):
 Dua produk berikutnya dengan kombinasi kategori+brand+berat yang sama akan dapat
 `BAT-ANT-10-002`, `BAT-ANT-10-003`, dst.
 
-Contoh response error:
-```json
-// 403 — role selain ADMIN/SUPER_ADMIN
-{"success":false,"error":{"code":"FORBIDDEN","message":"Anda tidak memiliki akses untuk aksi ini"}}
-
-// 400 — field wajib kosong
-{"success":false,"error":{"code":"BAD_REQUEST","message":"name, category_id, dan brand_id wajib diisi"}}
-
-// 400 — weight_gram <= 0
-{"success":false,"error":{"code":"BAD_REQUEST","message":"weight_gram harus lebih besar dari 0"}}
-
-// 400 — category_id/brand_id merujuk ke resource yang is_active=false
-{"success":false,"error":{"code":"BAD_REQUEST","message":"kategori tidak aktif"}}
-
-// 404 — category_id/brand_id valid UUID tapi tidak ada
-{"success":false,"error":{"code":"NOT_FOUND","message":"kategori tidak ditemukan"}}
-```
-
 Catatan:
 - `created_by` diambil dari `claims.UserID` (JWT), bukan dari body — tidak bisa dipalsukan klien.
 - `is_active` selalu `true` saat create, tidak bisa di-set lewat body.
-- Scope BE-201 cuma `POST` — belum ada `GET`/`PUT`/`DELETE` untuk `/api/products` (ticket terpisah).
+- Belum ada `PUT`/`DELETE` untuk `/api/products` (ticket terpisah).
+
+#### GET /api/products — list terpaginasi & terfilter
+
+Query params, semua opsional:
+- `search` — cocok ke `name` (`ILIKE`, case-insensitive substring).
+- `category_id` / `brand_id` — `public_id` (UUID). Kalau nilainya tidak match kategori/brand
+  manapun, hasilnya list kosong (`items: []`, `total: 0`), **bukan** 404 — ini filter, bukan lookup
+  resource wajib.
+- `page` (default `1`), `limit` (default `20`, di-cap maksimum `100`).
+
+List **selalu** `WHERE is_active = true` — produk yang diarsipkan tidak pernah muncul di sini,
+walau requester-nya SUPER_ADMIN.
+
+Contoh response `GET /api/products?search=emas&page=1&limit=20` (200):
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f",
+        "name": "Emas Batangan 10gr",
+        "sku": "BAT-ANT-10-001",
+        "category": { "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "name": "Batangan" },
+        "brand": { "id": "5c9e1a3b-8f2d-4a6e-9b1c-7d8e9f0a1b2c", "name": "Antam" },
+        "weight_gram": 10,
+        "description": "Emas batangan Antam 10 gram",
+        "is_active": true,
+        "created_at": "2026-07-31T09:00:00Z",
+        "updated_at": "2026-07-31T09:00:00Z"
+      }
+    ],
+    "pagination": { "page": 1, "limit": 20, "total": 1, "total_pages": 1 }
+  }
+}
+```
+
+#### GET /api/products/{id} — detail lengkap
+
+`{id}` adalah `public_id` (UUID). Tidak difilter `is_active` — produk yang sudah diarsipkan tetap
+bisa diambil detailnya (cuma disembunyikan dari list, bukan dihapus/disamarkan datanya). Response-nya
+objek produk yang sama seperti item di list / response `POST`.
+
+Contoh response error (berlaku utk `POST`, `GET`, dan `GET /{id}`):
+```json
+// 403 — POST oleh role selain ADMIN/SUPER_ADMIN
+{"success":false,"error":{"code":"FORBIDDEN","message":"Anda tidak memiliki akses untuk aksi ini"}}
+
+// 400 — POST, field wajib kosong
+{"success":false,"error":{"code":"BAD_REQUEST","message":"name, category_id, dan brand_id wajib diisi"}}
+
+// 400 — POST, weight_gram <= 0
+{"success":false,"error":{"code":"BAD_REQUEST","message":"weight_gram harus lebih besar dari 0"}}
+
+// 400 — POST, category_id/brand_id merujuk ke resource yang is_active=false
+{"success":false,"error":{"code":"BAD_REQUEST","message":"kategori tidak aktif"}}
+
+// 404 — POST: category_id/brand_id valid UUID tapi tidak ada; atau GET /{id} tidak ditemukan
+{"success":false,"error":{"code":"NOT_FOUND","message":"kategori tidak ditemukan"}}
+// (GET /{id} not found: "produk tidak ditemukan")
+
+// 400 — GET /{id} dengan id bukan format UUID
+{"success":false,"error":{"code":"BAD_REQUEST","message":"id tidak valid"}}
+```
 
 ## Middleware JWT & role (internal/middleware/auth.go)
 
@@ -439,14 +494,25 @@ Dua lapis test:
   (unique index case-insensitive di `lower(name)`)
 - Get dengan id bukan UUID → 400; UUID valid tapi tidak ada → 404
 
-**`products_test.go`** — `POST /api/products` (create only, ADMIN & SUPER_ADMIN, BE-201)
-- Tanpa token → 401; role KASIR → 403
+**`products_test.go`** — `/api/products` (BE-201 create + BE-202 list/detail)
+- `POST` (ADMIN & SUPER_ADMIN): tanpa token → 401; role KASIR → 403
 - Create dengan kategori "Batangan" + brand "Antam" + berat 10 → `sku == "BAT-ANT-10-001"`,
-  `is_active == true`, `category_id`/`brand_id` di response sama dengan yang dikirim
+  `is_active == true`, `category`/`brand` nested `{id, name}` sama dengan yang dikirim/dipilih
 - Dua create dengan kombinasi kategori+brand+berat identik → SKU kedua `...-002` (urut naik)
 - Field wajib kosong (`name`/`category_id`/`brand_id`) → 400; `weight_gram <= 0` → 400
 - `category_id`/`brand_id` UUID valid tapi tidak ada → 404
 - `category_id` merujuk kategori yang sudah `is_active=false` → 400
+- `GET` list & detail (semua role, token valid): tanpa token → 401; role KASIR tetap bisa akses
+  (beda dari `POST` yang admin-only)
+- List: produk yang diarsipkan (`is_active=false`, di-set langsung lewat SQL di test — belum ada
+  endpoint deactivate) tidak muncul, `pagination.total` cuma menghitung yang aktif
+- List: `?search=`, `?category_id=`, `?brand_id=` masing-masing menyempitkan hasil dengan benar
+- List: `?limit=&page=` membagi halaman dengan benar, `pagination.total_pages` sesuai
+- List: `?category_id=` UUID valid tapi tidak ada → 200 dengan `items: []` (bukan 404 — ini filter)
+- Detail: mengembalikan data lengkap termasuk `category`/`brand` nested; UUID valid tapi tidak ada
+  → 404; format id bukan UUID → 400
+- Detail: produk yang sudah diarsipkan **tetap** bisa diambil (200, `is_active: false`) — cuma
+  disembunyikan dari list, bukan dari lookup-by-id
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta

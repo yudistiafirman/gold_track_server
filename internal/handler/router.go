@@ -44,6 +44,9 @@ func NewRouter(
 			r.Use(appmw.JWTAuth(authService))
 			r.Post("/auth/logout", authHandler.Logout)
 
+			r.Get("/products", productHandler.List)
+			r.Get("/products/{id}", productHandler.Get)
+
 			r.Group(func(r chi.Router) {
 				r.Use(appmw.RequireRole("SUPER_ADMIN"))
 				r.Route("/users", func(r chi.Router) {

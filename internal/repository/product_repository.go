@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"gold-track-be/internal/model"
@@ -19,13 +21,56 @@ var ErrSKUConflict = errors.New("sku conflict")
 // retry budget without landing a unique SKU.
 var ErrSKUGenerationFailed = errors.New("failed to generate a unique sku")
 
+// ErrProductNotFound is returned when no product matches the lookup.
+var ErrProductNotFound = errors.New("product not found")
+
 const createProductMaxAttempts = 5
+
+// ProductFilter narrows ProductRepository.List. CategoryID/BrandID are
+// resolved internal ids (nil means "no filter on this field") — the service
+// layer resolves client-supplied public_ids before building this.
+type ProductFilter struct {
+	Search     string
+	CategoryID *int64
+	BrandID    *int64
+	Page       int
+	Limit      int
+}
+
+// ProductWithRefs is a product joined with its category/brand identity —
+// list/detail views need the names, not just the internal FK, to render a
+// human-facing catalog without a second round trip per row.
+type ProductWithRefs struct {
+	model.Product
+	CategoryPublicID string
+	CategoryName     string
+	BrandPublicID    string
+	BrandName        string
+}
+
+const productWithRefsColumns = `
+	p.id, p.public_id::text, p.name, p.sku, p.category_id, p.brand_id,
+	p.weight_gram::float8, p.description, p.is_active, p.created_by, p.created_at, p.updated_at,
+	c.public_id::text, c.name, b.public_id::text, b.name
+`
+
+const productWithRefsFrom = `
+	FROM products p
+	JOIN categories c ON c.id = p.category_id
+	JOIN brands b ON b.id = p.brand_id
+`
 
 type ProductRepository interface {
 	// CreateWithGeneratedSKU counts existing products sharing skuPrefix,
 	// appends a zero-padded sequence number, and inserts — retrying the
 	// whole count+insert unit on a concurrent unique-violation race.
 	CreateWithGeneratedSKU(ctx context.Context, p *model.Product, skuPrefix string) (*model.Product, error)
+	// List returns active products (is_active = true) matching filter,
+	// along with the total count ignoring pagination.
+	List(ctx context.Context, filter ProductFilter) ([]ProductWithRefs, int, error)
+	// FindByPublicID looks up a product regardless of is_active — archiving
+	// only hides a product from List, it stays reachable by id.
+	FindByPublicID(ctx context.Context, publicID string) (*ProductWithRefs, error)
 }
 
 type productRepository struct {
@@ -82,4 +127,75 @@ func (r *productRepository) tryCreate(ctx context.Context, p *model.Product, sku
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 	return p, nil
+}
+
+func scanProductWithRefs(row pgx.Row, p *ProductWithRefs) error {
+	return row.Scan(
+		&p.ID, &p.PublicID, &p.Name, &p.SKU, &p.CategoryID, &p.BrandID,
+		&p.WeightGram, &p.Description, &p.IsActive, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
+		&p.CategoryPublicID, &p.CategoryName, &p.BrandPublicID, &p.BrandName,
+	)
+}
+
+func (r *productRepository) List(ctx context.Context, filter ProductFilter) ([]ProductWithRefs, int, error) {
+	conditions := []string{"p.is_active = true"}
+	var args []any
+
+	if filter.Search != "" {
+		args = append(args, "%"+filter.Search+"%")
+		conditions = append(conditions, fmt.Sprintf("p.name ILIKE $%d", len(args)))
+	}
+	if filter.CategoryID != nil {
+		args = append(args, *filter.CategoryID)
+		conditions = append(conditions, fmt.Sprintf("p.category_id = $%d", len(args)))
+	}
+	if filter.BrandID != nil {
+		args = append(args, *filter.BrandID)
+		conditions = append(conditions, fmt.Sprintf("p.brand_id = $%d", len(args)))
+	}
+	where := "WHERE " + strings.Join(conditions, " AND ")
+
+	var total int
+	countQuery := `SELECT COUNT(*) FROM products p ` + where
+	if err := r.db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count products: %w", err)
+	}
+
+	limitArg := len(args) + 1
+	offsetArg := len(args) + 2
+	listArgs := append(append([]any{}, args...), filter.Limit, (filter.Page-1)*filter.Limit)
+	listQuery := `SELECT ` + productWithRefsColumns + productWithRefsFrom + where +
+		fmt.Sprintf(" ORDER BY p.id LIMIT $%d OFFSET $%d", limitArg, offsetArg)
+
+	rows, err := r.db.Query(ctx, listQuery, listArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list products: %w", err)
+	}
+	defer rows.Close()
+
+	var products []ProductWithRefs
+	for rows.Next() {
+		var p ProductWithRefs
+		if err := scanProductWithRefs(rows, &p); err != nil {
+			return nil, 0, fmt.Errorf("scan product row: %w", err)
+		}
+		products = append(products, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("list products: %w", err)
+	}
+	return products, total, nil
+}
+
+func (r *productRepository) FindByPublicID(ctx context.Context, publicID string) (*ProductWithRefs, error) {
+	query := `SELECT ` + productWithRefsColumns + productWithRefsFrom + `WHERE p.public_id = $1`
+
+	var p ProductWithRefs
+	if err := scanProductWithRefs(r.db.QueryRow(ctx, query, publicID), &p); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrProductNotFound
+		}
+		return nil, fmt.Errorf("find product by public id: %w", err)
+	}
+	return &p, nil
 }

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -12,16 +13,29 @@ import (
 	"gold-track-be/pkg/apperror"
 )
 
+const (
+	defaultProductPage  = 1
+	defaultProductLimit = 20
+	maxProductLimit     = 100
+)
+
+// ProductRef is the nested category/brand identity embedded in
+// ProductSummary — a browse/search view needs names, not opaque ids, to be
+// useful to a human without a second round trip per row.
+type ProductRef struct {
+	PublicID string
+	Name     string
+}
+
 // ProductSummary is the public-facing view of a product: only PublicID
 // (UUID) ever leaves this layer, the internal bigint PK stays in
-// model.Product/the repository. CategoryID/BrandID here are the public_id
-// UUIDs the client submitted, echoed back — not the internal bigint FKs.
+// model.Product/the repository.
 type ProductSummary struct {
 	PublicID    string
 	Name        string
 	SKU         string
-	CategoryID  string
-	BrandID     string
+	Category    ProductRef
+	Brand       ProductRef
 	WeightGram  float64
 	Description string
 	IsActive    bool
@@ -38,8 +52,26 @@ type CreateProductInput struct {
 	CreatedByPublicID string
 }
 
+type ListProductsInput struct {
+	Search           string
+	CategoryPublicID string
+	BrandPublicID    string
+	Page             int
+	Limit            int
+}
+
+type ProductListResult struct {
+	Items      []ProductSummary
+	Page       int
+	Limit      int
+	Total      int
+	TotalPages int
+}
+
 type ProductService interface {
 	Create(ctx context.Context, input CreateProductInput) (ProductSummary, error)
+	List(ctx context.Context, input ListProductsInput) (ProductListResult, error)
+	Get(ctx context.Context, publicID string) (ProductSummary, error)
 }
 
 type productService struct {
@@ -121,7 +153,82 @@ func (s *productService) Create(ctx context.Context, input CreateProductInput) (
 		return ProductSummary{}, apperror.Internal("failed to create product", err)
 	}
 
-	return toProductSummary(created, input.CategoryPublicID, input.BrandPublicID), nil
+	return toProductSummary(created, ProductRef{PublicID: category.PublicID, Name: category.Name}, ProductRef{PublicID: brand.PublicID, Name: brand.Name}), nil
+}
+
+func (s *productService) List(ctx context.Context, input ListProductsInput) (ProductListResult, error) {
+	page := input.Page
+	if page <= 0 {
+		page = defaultProductPage
+	}
+	limit := input.Limit
+	if limit <= 0 {
+		limit = defaultProductLimit
+	}
+	if limit > maxProductLimit {
+		limit = maxProductLimit
+	}
+
+	filter := repository.ProductFilter{
+		Search: strings.TrimSpace(input.Search),
+		Page:   page,
+		Limit:  limit,
+	}
+
+	if input.CategoryPublicID != "" {
+		category, err := s.categoryRepo.FindByPublicID(ctx, input.CategoryPublicID)
+		if err != nil {
+			if errors.Is(err, repository.ErrCategoryNotFound) {
+				return emptyProductList(page, limit), nil
+			}
+			return ProductListResult{}, apperror.Internal("failed to fetch category", err)
+		}
+		filter.CategoryID = &category.ID
+	}
+
+	if input.BrandPublicID != "" {
+		brand, err := s.brandRepo.FindByPublicID(ctx, input.BrandPublicID)
+		if err != nil {
+			if errors.Is(err, repository.ErrBrandNotFound) {
+				return emptyProductList(page, limit), nil
+			}
+			return ProductListResult{}, apperror.Internal("failed to fetch brand", err)
+		}
+		filter.BrandID = &brand.ID
+	}
+
+	products, total, err := s.productRepo.List(ctx, filter)
+	if err != nil {
+		return ProductListResult{}, apperror.Internal("failed to list products", err)
+	}
+
+	items := make([]ProductSummary, 0, len(products))
+	for i := range products {
+		items = append(items, toProductSummaryFromRefs(&products[i]))
+	}
+
+	return ProductListResult{
+		Items:      items,
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: int(math.Ceil(float64(total) / float64(limit))),
+	}, nil
+}
+
+func (s *productService) Get(ctx context.Context, publicID string) (ProductSummary, error) {
+	product, err := s.productRepo.FindByPublicID(ctx, publicID)
+	if err != nil {
+		if errors.Is(err, repository.ErrProductNotFound) {
+			return ProductSummary{}, apperror.NotFound("produk tidak ditemukan", nil)
+		}
+		return ProductSummary{}, apperror.Internal("failed to fetch product", err)
+	}
+	return toProductSummaryFromRefs(product), nil
+}
+
+func emptyProductList(page, limit int) ProductListResult {
+	return ProductListResult{Items: []ProductSummary{}, Page: page, Limit: limit, Total: 0, TotalPages: 0}
 }
 
 func validateProductFields(name, categoryPublicID, brandPublicID string, weightGram float64) error {
@@ -155,7 +262,7 @@ func formatWeight(w float64) string {
 	return strconv.FormatFloat(w, 'f', -1, 64)
 }
 
-func toProductSummary(p *model.Product, categoryPublicID, brandPublicID string) ProductSummary {
+func toProductSummary(p *model.Product, category, brand ProductRef) ProductSummary {
 	description := ""
 	if p.Description != nil {
 		description = *p.Description
@@ -164,12 +271,20 @@ func toProductSummary(p *model.Product, categoryPublicID, brandPublicID string) 
 		PublicID:    p.PublicID,
 		Name:        p.Name,
 		SKU:         p.SKU,
-		CategoryID:  categoryPublicID,
-		BrandID:     brandPublicID,
+		Category:    category,
+		Brand:       brand,
 		WeightGram:  p.WeightGram,
 		Description: description,
 		IsActive:    p.IsActive,
 		CreatedAt:   p.CreatedAt,
 		UpdatedAt:   p.UpdatedAt,
 	}
+}
+
+func toProductSummaryFromRefs(p *repository.ProductWithRefs) ProductSummary {
+	return toProductSummary(
+		&p.Product,
+		ProductRef{PublicID: p.CategoryPublicID, Name: p.CategoryName},
+		ProductRef{PublicID: p.BrandPublicID, Name: p.BrandName},
+	)
 }
