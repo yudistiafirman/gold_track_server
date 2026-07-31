@@ -65,10 +65,11 @@ go run ./cmd/migrate force 5       # paksa set versi tanpa jalankan SQL (recover
 ```
 
 Tabel `schema_migrations` dibuat otomatis untuk melacak versi yang sudah diterapkan.
-Urutan file (`000001`…`000015`) mengikuti dependency FK: `users` → `suppliers` /
+Urutan file (`000001`…`000016`) mengikuti dependency FK: `users` → `suppliers` /
 `customers` / `expense_categories` → `products` / `gold_prices` → `purchase_orders` →
 `purchase_order_items` → `stock_items` → `transactions` → `transaction_items` →
-`expenses` → `settings` → `stock_opnames` → `stock_opname_items`.
+`expenses` → `settings` → `stock_opnames` → `stock_opname_items` → `token_blacklist`.
+`000017` (`categories`) dan `000018` (`brands`) berdiri sendiri (belum di-FK dari `products`).
 
 Menambah migrasi baru: buat pasangan file
 `migrations/{next_number}_{deskripsi}.up.sql` dan `.down.sql`.
@@ -149,6 +150,35 @@ Catatan:
   referensi `users.id` lewat FK tanpa `ON DELETE CASCADE`, jadi hard delete akan gagal begitu
   user itu pernah membuat data apa pun. Reaktivasi lewat `PUT` dengan `is_active: true`.
 - SUPER_ADMIN tidak bisa menonaktifkan akun sendiri lewat `DELETE` (mencegah lockout).
+
+### /api/categories & /api/brands — master data (ADMIN & SUPER_ADMIN)
+
+Semua route ini butuh `Authorization: Bearer <jwt>` DAN role `ADMIN` atau `SUPER_ADMIN`
+(role lain → 403). Dipakai FE buat dropdown/autocomplete kategori & brand produk.
+
+```bash
+GET    /api/categories        # list semua kategori
+POST   /api/categories        # { name }                    -> 201
+GET    /api/categories/{id}   # detail kategori               -> 200 / 404
+PUT    /api/categories/{id}   # { name, is_active }           -> 200 / 404 / 409
+DELETE /api/categories/{id}   # soft delete (is_active=false) -> 200 / 404
+
+GET    /api/brands             # list semua brand
+POST   /api/brands             # { name }                    -> 201
+GET    /api/brands/{id}        # detail brand                  -> 200 / 404
+PUT    /api/brands/{id}        # { name, is_active }           -> 200 / 404 / 409
+DELETE /api/brands/{id}        # soft delete (is_active=false) -> 200 / 404
+```
+
+Catatan:
+- `{id}` juga `public_id` (UUID), sama seperti `/api/users`.
+- `name` unik **case-insensitive** (unique index di `lower(name)`) — "Antam" dan "antam"
+  dianggap sama, konflik → 409. Ini penting karena SKU produk (BE-201) nantinya diturunkan
+  langsung dari `name` ini.
+- `DELETE` adalah **soft delete** (`is_active=false`), tidak ada guard "tidak bisa hapus diri
+  sendiri" seperti di `/api/users` karena resource ini bukan akun.
+- Belum ada FK dari `products` ke tabel ini — `products.category`/`products.brand` masih
+  kolom lama (lihat migration `000005`); menyambungkannya adalah pekerjaan BE-201 berikutnya.
 
 ## Middleware JWT & role (internal/middleware/auth.go)
 
@@ -234,6 +264,16 @@ Dua lapis test:
 - Get dengan id bukan UUID (mis. `/api/users/1`) → 400, dicegah sebelum sempat query DB
 - Get id UUID valid tapi tidak ada → 404
 - SUPER_ADMIN tidak bisa menonaktifkan akun sendiri lewat `DELETE` → 400 (guard anti-lockout)
+
+**`categories_test.go`** / **`brands_test.go`** — `/api/categories`, `/api/brands` (CRUD, ADMIN & SUPER_ADMIN)
+- Semua route tanpa token → 401
+- Role selain ADMIN/SUPER_ADMIN (mis. KASIR) → 403
+- Alur penuh create → list → get → update → delete: create 201 (`is_active=true` default),
+  muncul di list, get by `public_id` benar, update mengubah `name`, delete = soft delete
+  (get setelahnya tetap 200 tapi `is_active=false`)
+- Create dengan nama duplikat (termasuk beda case, mis. `"Koin"` vs `"koin"`) → 409
+  (unique index case-insensitive di `lower(name)`)
+- Get dengan id bukan UUID → 400; UUID valid tapi tidak ada → 404
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta

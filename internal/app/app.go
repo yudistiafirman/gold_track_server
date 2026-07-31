@@ -41,7 +41,15 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	userService := service.NewUserService(userRepo)
 	userHandler := handler.NewUserHandler(userService)
 
-	router := handler.NewRouter(log, healthHandler, authHandler, authService, userHandler)
+	categoryRepo := repository.NewCategoryRepository(dbPool)
+	categoryService := service.NewCategoryService(categoryRepo)
+	categoryHandler := handler.NewCategoryHandler(categoryService)
+
+	brandRepo := repository.NewBrandRepository(dbPool)
+	brandService := service.NewBrandService(brandRepo)
+	brandHandler := handler.NewBrandHandler(brandService)
+
+	router := handler.NewRouter(log, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler)
 
 	return &App{Pool: dbPool, Router: router}, nil
 }

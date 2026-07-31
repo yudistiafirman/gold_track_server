@@ -81,7 +81,7 @@ func resetDB(t *testing.T) {
 			token_blacklist, stock_opname_items, stock_opnames, expenses,
 			expense_categories, transaction_items, transactions,
 			purchase_order_items, purchase_orders, stock_items, gold_prices,
-			products, customers, suppliers, settings, users
+			products, categories, brands, customers, suppliers, settings, users
 		RESTART IDENTITY CASCADE
 	`
 	if _, err := testPool.Exec(context.Background(), query); err != nil {

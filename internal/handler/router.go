@@ -24,6 +24,8 @@ func NewRouter(
 	authHandler *AuthHandler,
 	authService service.AuthService,
 	userHandler *UserHandler,
+	categoryHandler *CategoryHandler,
+	brandHandler *BrandHandler,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -49,6 +51,24 @@ func NewRouter(
 					r.Get("/{id}", userHandler.Get)
 					r.Put("/{id}", userHandler.Update)
 					r.Delete("/{id}", userHandler.Delete)
+				})
+			})
+
+			r.Group(func(r chi.Router) {
+				r.Use(appmw.RequireRole("ADMIN", "SUPER_ADMIN"))
+				r.Route("/categories", func(r chi.Router) {
+					r.Get("/", categoryHandler.List)
+					r.Post("/", categoryHandler.Create)
+					r.Get("/{id}", categoryHandler.Get)
+					r.Put("/{id}", categoryHandler.Update)
+					r.Delete("/{id}", categoryHandler.Delete)
+				})
+				r.Route("/brands", func(r chi.Router) {
+					r.Get("/", brandHandler.List)
+					r.Post("/", brandHandler.Create)
+					r.Get("/{id}", brandHandler.Get)
+					r.Put("/{id}", brandHandler.Update)
+					r.Delete("/{id}", brandHandler.Delete)
 				})
 			})
 		})
