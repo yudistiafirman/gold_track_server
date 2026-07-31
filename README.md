@@ -286,11 +286,13 @@ POST   /api/products        # { name, category_id, brand_id, weight_gram, descri
 GET    /api/products        # ?search=&category_id=&brand_id=&page=&limit=          -> 200 (semua role, token valid)
 GET    /api/products/{id}   # detail lengkap, termasuk produk yang sudah diarsipkan -> 200 / 404 (semua role, token valid)
 PUT    /api/products/{id}   # { name, category_id, brand_id, weight_gram, description?, is_active } -> 200 / 404 (ADMIN & SUPER_ADMIN)
+DELETE /api/products/{id}   # soft delete (is_active=false), ditolak kalau masih ada stok AVAILABLE -> 200 / 404 / 409 (ADMIN & SUPER_ADMIN)
 ```
 
-`POST`/`PUT` dibatasi `ADMIN`/`SUPER_ADMIN` (role lain → 403); `GET` (list & detail) bisa diakses
-semua role selama tokennya valid — tidak ada `RequireRole` tambahan, cuma perlu login (lihat
-`internal/handler/router.go`: kedua route `GET` ini sengaja diletakkan di luar grup `RequireRole`).
+`POST`/`PUT`/`DELETE` dibatasi `ADMIN`/`SUPER_ADMIN` (role lain → 403); `GET` (list & detail) bisa
+diakses semua role selama tokennya valid — tidak ada `RequireRole` tambahan, cuma perlu login
+(lihat `internal/handler/router.go`: kedua route `GET` ini sengaja diletakkan di luar grup
+`RequireRole`).
 
 #### POST /api/products — create dengan SKU auto-generate
 
@@ -334,8 +336,8 @@ Dua produk berikutnya dengan kombinasi kategori+brand+berat yang sama akan dapat
 Catatan:
 - `created_by` diambil dari `claims.UserID` (JWT), bukan dari body — tidak bisa dipalsukan klien.
 - `is_active` selalu `true` saat create, tidak bisa di-set lewat body.
-- Belum ada `DELETE` untuk `/api/products` — nonaktifkan/reaktivasi produk lewat `PUT` dengan
-  `is_active` (lihat di bawah).
+- Arsipkan produk lewat `DELETE` (lihat di bawah, ada guard stok `AVAILABLE`); reaktivasi lewat
+  `PUT` dengan `is_active: true`.
 
 #### PUT /api/products/{id} — edit produk, SKU tidak berubah
 
@@ -347,8 +349,9 @@ kategori/brand-nya sama persis dengan `POST` (wajib ada, harus `is_active=true`)
 `sku` **tidak pernah** ikut berubah lewat endpoint ini — kolom `sku` sengaja tidak ada di
 query `UPDATE` (`ProductRepository.Update`), jadi walau `name`/`category_id`/`brand_id`/`weight_gram`
 diubah, SKU yang sudah ter-generate saat create tetap sama. `{id}` yang tidak ditemukan → 404.
-Karena body mencakup `is_active`, endpoint ini juga jadi satu-satunya cara mereaktivasi produk yang
-sudah diarsipkan (`is_active: true` → muncul lagi di `GET /api/products`).
+Karena body mencakup `is_active`, endpoint ini juga jadi cara mereaktivasi produk yang sudah
+diarsipkan lewat `DELETE` (`is_active: true` → muncul lagi di `GET /api/products`) — tidak kena
+guard stok `AVAILABLE`, karena guard itu cuma berlaku untuk `DELETE`.
 
 Contoh response `PUT /api/products/{id}` (200) — misal produk yang tadinya `BAT-ANT-10-001`
 diubah nama/kategori/brand/beratnya:
@@ -370,6 +373,30 @@ diubah nama/kategori/brand/beratnya:
 }
 ```
 `sku` tetap `BAT-ANT-10-001` meski kategori/brand/berat berubah total — bukti SKU immutable.
+
+#### DELETE /api/products/{id} — arsipkan produk (dijaga stok AVAILABLE)
+
+Soft delete (`is_active=false`) — baris `products` tidak pernah dihapus, jadi data historis
+(transaksi lama, `stock_items` yang sudah `SOLD`) tetap utuh dan tetap bisa di-join/dilaporkan.
+
+**Guard**: ditolak (`409`) kalau produk masih punya baris `stock_items` dengan `status='AVAILABLE'`
+— mengarsipkan produk yang stoknya masih bisa dijual akan bikin stok itu "yatim" (tidak muncul di
+katalog tapi masih ada fisiknya). Produk yang stoknya semua sudah `SOLD` (atau belum punya stok
+sama sekali) boleh diarsipkan.
+
+```bash
+DELETE /api/products/{id}
+```
+
+Contoh response sukses (200): `{"success":true,"data":{"message":"produk diarsipkan"}}`
+
+Contoh response gagal (409) — masih ada stok `AVAILABLE`:
+```json
+{"success":false,"error":{"code":"CONFLICT","message":"produk masih memiliki stok tersedia (AVAILABLE), tidak bisa diarsipkan"}}
+```
+
+`{id}` tidak ditemukan → 404 (`"produk tidak ditemukan"`). Reaktivasi lewat `PUT` dengan
+`is_active: true` (lihat di atas) — `PUT` tidak kena guard stok ini.
 
 #### GET /api/products — list terpaginasi & terfilter
 
@@ -534,7 +561,7 @@ Dua lapis test:
   (unique index case-insensitive di `lower(name)`)
 - Get dengan id bukan UUID → 400; UUID valid tapi tidak ada → 404
 
-**`products_test.go`** — `/api/products` (BE-201 create + BE-202 list/detail + BE-203 update)
+**`products_test.go`** — `/api/products` (BE-201 create + BE-202 list/detail + BE-203 update + BE-204 archive)
 - `POST` (ADMIN & SUPER_ADMIN): tanpa token → 401; role KASIR → 403
 - Create dengan kategori "Batangan" + brand "Antam" + berat 10 → `sku == "BAT-ANT-10-001"`,
   `is_active == true`, `category`/`brand` nested `{id, name}` sama dengan yang dikirim/dipilih
@@ -544,8 +571,9 @@ Dua lapis test:
 - `category_id` merujuk kategori yang sudah `is_active=false` → 400
 - `GET` list & detail (semua role, token valid): tanpa token → 401; role KASIR tetap bisa akses
   (beda dari `POST` yang admin-only)
-- List: produk yang diarsipkan (`is_active=false`, di-set langsung lewat SQL di test — belum ada
-  endpoint deactivate) tidak muncul, `pagination.total` cuma menghitung yang aktif
+- List: produk yang diarsipkan (`is_active=false`, di-set langsung lewat SQL di test ini — di
+  produksi lewat `DELETE`, lihat BE-204 di bawah) tidak muncul, `pagination.total` cuma
+  menghitung yang aktif
 - List: `?search=`, `?category_id=`, `?brand_id=` masing-masing menyempitkan hasil dengan benar
 - List: `?limit=&page=` membagi halaman dengan benar, `pagination.total_pages` sesuai
 - List: `?category_id=` UUID valid tapi tidak ada → 200 dengan `items: []` (bukan 404 — ini filter)
@@ -561,6 +589,14 @@ Dua lapis test:
 - `category_id`/`brand_id` UUID valid tapi tidak ada → 404; merujuk yang `is_active=false` → 400
 - Update dengan `is_active: true` pada produk yang sudah diarsipkan (lewat SQL) → mereaktivasi
   (200, `is_active == true`, muncul lagi di `GET /api/products`)
+- `DELETE` (ADMIN & SUPER_ADMIN): tanpa token → 401; role KASIR → 403
+- Produk tanpa `stock_items` sama sekali → diarsipkan (200), `is_active=false` di detail, hilang
+  dari list
+- Produk dengan `stock_items` `status='AVAILABLE'` (di-insert langsung lewat SQL — belum ada
+  endpoint stok) → 409 dengan pesan jelas, produk tetap `is_active=true`
+- Produk yang stoknya semua `status='SOLD'` → tetap boleh diarsipkan (200) — guard-nya spesifik
+  ke `AVAILABLE`, bukan "ada histori stok apapun"
+- `{id}` tidak ditemukan → 404; format id bukan UUID → 400
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta

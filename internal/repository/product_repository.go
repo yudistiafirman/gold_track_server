@@ -75,6 +75,12 @@ type ProductRepository interface {
 	// and bumps updated_at — sku is deliberately never in the SET clause, so
 	// it cannot change regardless of what else is edited.
 	Update(ctx context.Context, p *model.Product) error
+	// HasAvailableStock reports whether any stock_items row for this
+	// product still has status = 'AVAILABLE' — the guard for archiving.
+	HasAvailableStock(ctx context.Context, productID int64) (bool, error)
+	// SetActive flips is_active and bumps updated_at, identified by
+	// public_id — used for archiving (is_active=false).
+	SetActive(ctx context.Context, publicID string, isActive bool) error
 }
 
 type productRepository struct {
@@ -219,6 +225,27 @@ func (r *productRepository) Update(ctx context.Context, p *model.Product) error 
 			return ErrProductNotFound
 		}
 		return fmt.Errorf("update product: %w", err)
+	}
+	return nil
+}
+
+func (r *productRepository) HasAvailableStock(ctx context.Context, productID int64) (bool, error) {
+	const query = `SELECT EXISTS(SELECT 1 FROM stock_items WHERE product_id = $1 AND status = 'AVAILABLE')`
+	var exists bool
+	if err := r.db.QueryRow(ctx, query, productID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check available stock: %w", err)
+	}
+	return exists, nil
+}
+
+func (r *productRepository) SetActive(ctx context.Context, publicID string, isActive bool) error {
+	const query = `UPDATE products SET is_active = $1, updated_at = now() WHERE public_id = $2`
+	tag, err := r.db.Exec(ctx, query, isActive, publicID)
+	if err != nil {
+		return fmt.Errorf("set product active status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProductNotFound
 	}
 	return nil
 }

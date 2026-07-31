@@ -83,6 +83,7 @@ type ProductService interface {
 	List(ctx context.Context, input ListProductsInput) (ProductListResult, error)
 	Get(ctx context.Context, publicID string) (ProductSummary, error)
 	Update(ctx context.Context, input UpdateProductInput) (ProductSummary, error)
+	Deactivate(ctx context.Context, publicID string) error
 }
 
 type productService struct {
@@ -298,6 +299,32 @@ func (s *productService) Update(ctx context.Context, input UpdateProductInput) (
 		ProductRef{PublicID: category.PublicID, Name: category.Name},
 		ProductRef{PublicID: brand.PublicID, Name: brand.Name},
 	), nil
+}
+
+func (s *productService) Deactivate(ctx context.Context, publicID string) error {
+	existing, err := s.productRepo.FindByPublicID(ctx, publicID)
+	if err != nil {
+		if errors.Is(err, repository.ErrProductNotFound) {
+			return apperror.NotFound("produk tidak ditemukan", nil)
+		}
+		return apperror.Internal("failed to fetch product", err)
+	}
+
+	hasStock, err := s.productRepo.HasAvailableStock(ctx, existing.ID)
+	if err != nil {
+		return apperror.Internal("failed to check product stock", err)
+	}
+	if hasStock {
+		return apperror.Conflict("produk masih memiliki stok tersedia (AVAILABLE), tidak bisa diarsipkan", nil)
+	}
+
+	if err := s.productRepo.SetActive(ctx, publicID, false); err != nil {
+		if errors.Is(err, repository.ErrProductNotFound) {
+			return apperror.NotFound("produk tidak ditemukan", nil)
+		}
+		return apperror.Internal("failed to archive product", err)
+	}
+	return nil
 }
 
 func emptyProductList(page, limit int) ProductListResult {

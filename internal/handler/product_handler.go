@@ -181,6 +181,23 @@ func (h *ProductHandler) Update(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, toProductResponse(result))
 }
 
+// Delete soft-deletes (archives) the target product; it never removes the
+// row, and is blocked (409) if the product still has AVAILABLE stock.
+func (h *ProductHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	id, err := publicIDParam(r)
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	if err := h.productService.Deactivate(r.Context(), id); err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, map[string]string{"message": "produk diarsipkan"})
+}
+
 func (h *ProductHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id, err := publicIDParam(r)
 	if err != nil {

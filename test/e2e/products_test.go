@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 )
 
 type productRefDTO struct {
@@ -83,6 +84,31 @@ func deactivateProduct(t *testing.T, publicID string) {
 	t.Helper()
 	if _, err := testPool.Exec(context.Background(), `UPDATE products SET is_active = false WHERE public_id = $1`, publicID); err != nil {
 		t.Fatalf("deactivate product: %v", err)
+	}
+}
+
+// createStockItem inserts a stock_items fixture row directly via SQL —
+// there are no stock endpoints yet, same reason deactivateProduct bypasses
+// the API for setup. createdByEmail identifies the owning user by email
+// (what seedUser returns), resolved here to its internal id.
+func createStockItem(t *testing.T, productPublicID, createdByEmail, status string) {
+	t.Helper()
+
+	var productID, userID int64
+	if err := testPool.QueryRow(context.Background(), `SELECT id FROM products WHERE public_id = $1`, productPublicID).Scan(&productID); err != nil {
+		t.Fatalf("resolve product id: %v", err)
+	}
+	if err := testPool.QueryRow(context.Background(), `SELECT id FROM users WHERE email = $1`, createdByEmail).Scan(&userID); err != nil {
+		t.Fatalf("resolve user id: %v", err)
+	}
+
+	barcode := fmt.Sprintf("BC-%d", time.Now().UnixNano())
+	_, err := testPool.Exec(context.Background(), `
+		INSERT INTO stock_items (product_id, barcode, serial_number, condition, purchase_price, purchase_date, status, created_by)
+		VALUES ($1, $2, $3, 'GOOD', 1000000, CURRENT_DATE, $4, $5)
+	`, productID, barcode, "SN-"+barcode, status, userID)
+	if err != nil {
+		t.Fatalf("create stock item fixture: %v", err)
 	}
 }
 
@@ -693,5 +719,129 @@ func TestProducts_KasirCanListAndGet(t *testing.T) {
 	status, resp = doRequest(t, http.MethodGet, "/api/products/"+created.ID, nil, kasirToken)
 	if status != http.StatusOK {
 		t.Fatalf("kasir get: expected 200, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestProducts_DeleteRequiresAuth(t *testing.T) {
+	resetDB(t)
+
+	status, _ := doRequest(t, http.MethodDelete, "/api/products/00000000-0000-0000-0000-000000000000", nil, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", status)
+	}
+}
+
+func TestProducts_DeleteNonAdminForbidden(t *testing.T) {
+	resetDB(t)
+	kasir := seedUser(t, "KASIR", true)
+	token := login(t, kasir.Email, kasir.Password)
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/products/00000000-0000-0000-0000-000000000000", nil, token)
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestProducts_DeleteArchivesProductWithoutStock(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	category := createCategory(t, adminToken, "Batangan")
+	brand := createBrand(t, adminToken, "Antam")
+	created := createProduct(t, adminToken, "Produk Tanpa Stok", category.ID, brand.ID, 10)
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/products/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/products/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get after archive: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched productDTO
+	decodeData(t, resp, &fetched)
+	if fetched.IsActive {
+		t.Fatal("expected is_active=false after archive")
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/products", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("list: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var list productListDTO
+	decodeData(t, resp, &list)
+	for _, p := range list.Items {
+		if p.ID == created.ID {
+			t.Fatal("archived product must not appear in active list")
+		}
+	}
+}
+
+func TestProducts_DeleteBlockedByAvailableStock(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	category := createCategory(t, adminToken, "Batangan")
+	brand := createBrand(t, adminToken, "Antam")
+	created := createProduct(t, adminToken, "Produk Ada Stok", category.ID, brand.ID, 10)
+	createStockItem(t, created.ID, admin.Email, "AVAILABLE")
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/products/"+created.ID, nil, adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409, got %d (resp=%+v)", status, resp)
+	}
+	if resp.Error == nil || resp.Error.Message == "" {
+		t.Fatal("expected a clear conflict message")
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/products/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched productDTO
+	decodeData(t, resp, &fetched)
+	if !fetched.IsActive {
+		t.Fatal("expected product to remain active when blocked by available stock")
+	}
+}
+
+func TestProducts_DeleteAllowedWhenStockIsSold(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	category := createCategory(t, adminToken, "Batangan")
+	brand := createBrand(t, adminToken, "Antam")
+	created := createProduct(t, adminToken, "Produk Stok Terjual", category.ID, brand.ID, 10)
+	createStockItem(t, created.ID, admin.Email, "SOLD")
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/products/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 when all stock is SOLD, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestProducts_DeleteNotFound(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/products/00000000-0000-0000-0000-000000000000", nil, adminToken)
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestProducts_DeleteInvalidIDFormat(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/products/1", nil, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-UUID id, got %d (resp=%+v)", status, resp)
 	}
 }
