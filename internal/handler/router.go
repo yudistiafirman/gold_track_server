@@ -57,6 +57,7 @@ func NewRouter(
 			r.Get("/stock-items/{id}/label", stockItemHandler.GetLabel)
 			r.Post("/transactions", transactionHandler.Create)
 			r.Get("/transactions/{id}", transactionHandler.Get)
+			r.Get("/transactions/{id}/receipt", transactionHandler.GetReceipt)
 			r.Route("/customers", func(r chi.Router) {
 				r.Get("/", customerHandler.List)
 				r.Post("/", customerHandler.Create)

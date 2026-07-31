@@ -952,13 +952,51 @@ Contoh response error:
 {"success":false,"error":{"code":"CONFLICT","message":"serial_number sudah dipakai"}}
 ```
 
-#### GET /api/transactions/{id} — detail transaksi / struk (BE-602)
+#### GET /api/transactions/{id} — detail transaksi (BE-602)
 
 Response-nya **objek yang sama persis** dengan response `POST /api/transactions` (fungsi mapping
 `toTransactionResponse` yang sama dipakai keduanya) — lengkap dengan `items[]`
 (`stock_item_id`/`barcode` per item buat cetak label ulang kalau perlu), tanpa `cogs`. Berlaku
 buat transaksi `SELL`, `SELL_SUPPLIER`, maupun `BUY`. `{id}` tidak ditemukan → 404
 (`"transaksi tidak ditemukan"`); bukan format UUID → 400.
+
+#### GET /api/transactions/{id}/receipt — struk transaksi (BE-1001)
+
+Payload untuk cetak struk (format dot matrix / continuous form) — backend cuma mengembalikan
+data terstruktur JSON, **tidak** merender PDF/gambar dan **tidak** menyimpan file apa pun.
+Rendering visual serta komunikasi ke printer sepenuhnya tanggung jawab FE/print-agent (sama
+prinsipnya dengan label barcode di `GET /api/stock-items/{id}/label`). Karena kebutuhan saat
+ini cukup cetak langsung (belum ada kirim struk lewat email dll.), tidak ada integrasi cloud
+storage/PDF di mana pun pada endpoint ini.
+
+```json
+{
+  "id": "...", "transaction_code": "TRX-20260731-0001", "type": "SELL",
+  "total_amount": 1500000, "total_weight": 10, "payment_method": "CASH", "status": "COMPLETED",
+  "items": [{ "id": "...", "stock_item_id": "...", "barcode": "...", "product_name": "...",
+              "weight_gram": 10, "price_per_gram": 150000, "price_total": 1500000 }],
+  "customer": { "name": "Budi Santoso", "phone": "0811111111", "address": "Jl. Mawar No. 2" },
+  "supplier": null,
+  "store": { "name": "Toko Emas Sejahtera", "address": "Jl. Testing No. 1, Jakarta", "phone": "021-1234567" },
+  "invoice_url": "/api/transactions/.../receipt",
+  "created_at": "...", "completed_at": "..."
+}
+```
+
+- **Snapshot, bukan master live**: `items[]` dibaca dari `transaction_items` (nama produk,
+  berat, harga per gram — semua sudah ter-snapshot saat transaksi dibuat), sama seperti response
+  `GET /api/transactions/{id}` — tidak pernah join ulang ke tabel `products` yang bisa saja
+  sudah berubah.
+- **`customer`/`supplier`**: hanya salah satu yang terisi sesuai `type` transaksi (`SELL`/`BUY`
+  → `customer`, `SELL_SUPPLIER` → `supplier`), sisanya `null`.
+- **`store`**: diambil dari tabel `settings` (`shop_name`/`shop_address`/`shop_phone`, yang sama
+  dipakai `cmd/seed/main.go`). Kalau setting belum di-seed, field-nya kosong (`""`), bukan error.
+- **`invoice_url` di-cache**: kolom `transactions.invoice_url` awalnya `NULL`; panggilan pertama
+  ke endpoint ini menghitung `"/api/transactions/{id}/receipt"` dan menyimpannya — panggilan
+  berikutnya memakai nilai yang sudah tersimpan (idempotent, tidak ada race karena nilainya
+  murni fungsi dari `public_id` transaksi sendiri).
+- Berlaku untuk semua tipe transaksi (`SELL`, `BUY`, `SELL_SUPPLIER`). `{id}` tidak ditemukan →
+  404 (`"transaksi tidak ditemukan"`); bukan format UUID → 400.
 
 ### /api/purchase-orders — order stok ke supplier (BE-901/BE-902/BE-903/BE-904, ADMIN & SUPER_ADMIN)
 
@@ -1341,6 +1379,20 @@ Dua lapis test:
   lagi → 409; `{id}` tidak ditemukan → 404
 - `POST /{id}/cancel`: PO `BELUM_DITERIMA` → 200, `status=DIBATALKAN`; PO yang sudah `DITERIMA`
   atau sudah `DIBATALKAN` → 409; tidak ditemukan → 404
+
+**`receipts_test.go`** — `GET /api/transactions/{id}/receipt` (BE-1001)
+- Tanpa token → 401
+- Struk transaksi `SELL`: `customer` terisi (nama/telepon/alamat dari fixture pelanggan),
+  `supplier` `null`, `store` sesuai settings yang di-seed, `items[]` sama dengan yang dibuat saat
+  checkout, `invoice_url == "/api/transactions/{id}/receipt"`
+- Struk transaksi `BUY`: `customer` terisi, `supplier` `null`
+- Struk transaksi `SELL_SUPPLIER`: `supplier` terisi (nama/telepon/alamat dari fixture supplier),
+  `customer` `null`
+- `invoice_url` di-cache: kolom `transactions.invoice_url` `NULL` sebelum panggilan pertama,
+  terisi setelahnya (dicek langsung ke `testPool`); panggilan kedua mengembalikan `invoice_url`
+  yang identik dengan panggilan pertama
+- Struk tanpa `settings` di-seed sama sekali → tetap 200, field `store` kosong (`""`), tidak error
+- `{id}` tidak ditemukan → 404; format id bukan UUID → 400
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta

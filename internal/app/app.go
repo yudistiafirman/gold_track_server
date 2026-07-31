@@ -65,8 +65,10 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	customerService := service.NewCustomerService(customerRepo)
 	customerHandler := handler.NewCustomerHandler(customerService)
 
+	settingsRepo := repository.NewSettingsRepository(dbPool)
+
 	transactionRepo := repository.NewTransactionRepository(dbPool)
-	transactionService := service.NewTransactionService(transactionRepo, stockItemRepo, productRepo, customerRepo, supplierRepo, userRepo)
+	transactionService := service.NewTransactionService(transactionRepo, stockItemRepo, productRepo, customerRepo, supplierRepo, userRepo, settingsRepo)
 	transactionHandler := handler.NewTransactionHandler(transactionService)
 
 	purchaseOrderRepo := repository.NewPurchaseOrderRepository(dbPool)

@@ -229,8 +229,7 @@ func (h *TransactionHandler) ListByCustomer(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// Get returns one transaction's full detail (with items) — used for
-// receipt/struk display. Works for both SELL and BUY.
+// Get returns one transaction's full detail (with items).
 func (h *TransactionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id, err := publicIDParam(r)
 	if err != nil {
@@ -245,4 +244,70 @@ func (h *TransactionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.JSON(w, http.StatusOK, toTransactionResponse(result))
+}
+
+// receiptPartyResponse is the counterparty (customer or supplier) shown on
+// a receipt — nil/omitted when not applicable to the transaction's type.
+type receiptPartyResponse struct {
+	Name    string `json:"name"`
+	Phone   string `json:"phone"`
+	Address string `json:"address"`
+}
+
+// receiptStoreResponse is the shop's own display data, sourced from settings.
+type receiptStoreResponse struct {
+	Name    string `json:"name"`
+	Address string `json:"address"`
+	Phone   string `json:"phone"`
+}
+
+type receiptResponse struct {
+	transactionResponse
+	Customer   *receiptPartyResponse `json:"customer,omitempty"`
+	Supplier   *receiptPartyResponse `json:"supplier,omitempty"`
+	Store      receiptStoreResponse  `json:"store"`
+	InvoiceURL string                `json:"invoice_url"`
+}
+
+func toReceiptResponse(r service.ReceiptSummary) receiptResponse {
+	var customer *receiptPartyResponse
+	if r.Customer != nil {
+		customer = &receiptPartyResponse{Name: r.Customer.Name, Phone: r.Customer.Phone, Address: r.Customer.Address}
+	}
+	var supplier *receiptPartyResponse
+	if r.Supplier != nil {
+		supplier = &receiptPartyResponse{Name: r.Supplier.Name, Phone: r.Supplier.Phone, Address: r.Supplier.Address}
+	}
+
+	return receiptResponse{
+		transactionResponse: toTransactionResponse(r.TransactionSummary),
+		Customer:            customer,
+		Supplier:            supplier,
+		Store: receiptStoreResponse{
+			Name:    r.Store.Name,
+			Address: r.Store.Address,
+			Phone:   r.Store.Phone,
+		},
+		InvoiceURL: r.InvoiceURL,
+	}
+}
+
+// GetReceipt returns a transaction's struk payload (BE-1001) — snapshotted
+// items plus counterparty/store display data, for all types (SELL, BUY,
+// SELL_SUPPLIER). Rendering (dot matrix/continuous form) and printing are
+// entirely the FE print-agent's responsibility; this only returns data.
+func (h *TransactionHandler) GetReceipt(w http.ResponseWriter, r *http.Request) {
+	id, err := publicIDParam(r)
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	result, err := h.transactionService.GetReceipt(r.Context(), id)
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, toReceiptResponse(result))
 }

@@ -43,6 +43,18 @@ const transactionColumns = `
 	gold_price_id, notes, invoice_url, status, created_by, created_at, completed_at
 `
 
+// transactionReceiptColumns is qualified with the t. alias, unlike
+// transactionColumns — the receipt query joins customers/suppliers, which
+// have columns of the same name (id, public_id, name, ...), so unqualified
+// references would be ambiguous.
+const transactionReceiptColumns = `
+	t.id, t.public_id::text, t.transaction_code, t.type, t.customer_id, t.supplier_id,
+	t.total_amount::float8, t.total_weight::float8, t.payment_method, t.payment_ref,
+	t.gold_price_id, t.notes, t.invoice_url, t.status, t.created_by, t.created_at, t.completed_at,
+	c.name, c.phone, c.address,
+	s.name, s.phone, s.address
+`
+
 const transactionItemColumns = `
 	ti.id, ti.public_id::text, ti.transaction_id, ti.stock_item_id, ti.product_name,
 	ti.weight_gram::float8, ti.price_per_gram::float8, ti.price_total::float8, ti.cogs::float8, ti.created_at,
@@ -61,6 +73,20 @@ type TransactionItemWithStockRef struct {
 	model.TransactionItem
 	StockItemPublicID string
 	Barcode           string
+}
+
+// TransactionWithParties is a transaction joined with its counterparty's
+// display fields (customer for SELL/BUY, supplier for SELL_SUPPLIER) — the
+// receipt view needs a name/phone/address to print, not just the internal
+// FK. Only one side is ever non-nil, matching the transaction's type.
+type TransactionWithParties struct {
+	model.Transaction
+	CustomerName    *string
+	CustomerPhone   *string
+	CustomerAddress *string
+	SupplierName    *string
+	SupplierPhone   *string
+	SupplierAddress *string
 }
 
 // TransactionFilter narrows TransactionRepository.ListByCustomer.
@@ -139,6 +165,15 @@ type TransactionRepository interface {
 	// transaction_items (each joined with its stock item's public_id/barcode),
 	// regardless of type — used for the detail/struk view.
 	FindByPublicID(ctx context.Context, publicID string) (*model.Transaction, []TransactionItemWithStockRef, error)
+	// FindReceiptByPublicID is like FindByPublicID but also joins in the
+	// counterparty's (customer or supplier) display fields — used for the
+	// receipt view, which needs a name/phone/address to print.
+	FindReceiptByPublicID(ctx context.Context, publicID string) (*TransactionWithParties, []TransactionItemWithStockRef, error)
+	// SetInvoiceURL caches the receipt's canonical URL on first generation.
+	// Idempotent — the value is a pure function of the transaction's own
+	// public_id, so a concurrent caller racing to set it computes the same
+	// value, no lost-update risk.
+	SetInvoiceURL(ctx context.Context, id int64, url string) error
 }
 
 type transactionRepository struct {
@@ -526,4 +561,60 @@ func (r *transactionRepository) FindByPublicID(ctx context.Context, publicID str
 	}
 
 	return &t, items, nil
+}
+
+func scanTransactionWithParties(row pgx.Row, t *TransactionWithParties) error {
+	return row.Scan(
+		&t.ID, &t.PublicID, &t.TransactionCode, &t.Type, &t.CustomerID, &t.SupplierID,
+		&t.TotalAmount, &t.TotalWeight, &t.PaymentMethod, &t.PaymentRef,
+		&t.GoldPriceID, &t.Notes, &t.InvoiceURL, &t.Status, &t.CreatedBy, &t.CreatedAt, &t.CompletedAt,
+		&t.CustomerName, &t.CustomerPhone, &t.CustomerAddress,
+		&t.SupplierName, &t.SupplierPhone, &t.SupplierAddress,
+	)
+}
+
+func (r *transactionRepository) FindReceiptByPublicID(ctx context.Context, publicID string) (*TransactionWithParties, []TransactionItemWithStockRef, error) {
+	query := `
+		SELECT ` + transactionReceiptColumns + `
+		FROM transactions t
+		LEFT JOIN customers c ON c.id = t.customer_id
+		LEFT JOIN suppliers s ON s.id = t.supplier_id
+		WHERE t.public_id = $1
+	`
+
+	var t TransactionWithParties
+	if err := scanTransactionWithParties(r.db.QueryRow(ctx, query, publicID), &t); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, ErrTransactionNotFound
+		}
+		return nil, nil, fmt.Errorf("find transaction receipt by public id: %w", err)
+	}
+
+	itemsQuery := `SELECT ` + transactionItemColumns + transactionItemFrom + `WHERE ti.transaction_id = $1 ORDER BY ti.id`
+	rows, err := r.db.Query(ctx, itemsQuery, t.ID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list transaction items: %w", err)
+	}
+	defer rows.Close()
+
+	var items []TransactionItemWithStockRef
+	for rows.Next() {
+		var it TransactionItemWithStockRef
+		if err := scanTransactionItemWithStockRef(rows, &it); err != nil {
+			return nil, nil, fmt.Errorf("scan transaction item row: %w", err)
+		}
+		items = append(items, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("list transaction items: %w", err)
+	}
+
+	return &t, items, nil
+}
+
+func (r *transactionRepository) SetInvoiceURL(ctx context.Context, id int64, url string) error {
+	if _, err := r.db.Exec(ctx, `UPDATE transactions SET invoice_url = $1 WHERE id = $2`, url, id); err != nil {
+		return fmt.Errorf("set invoice url: %w", err)
+	}
+	return nil
 }

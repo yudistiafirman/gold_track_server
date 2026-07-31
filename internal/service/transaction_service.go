@@ -94,6 +94,32 @@ type ListCustomerTransactionsInput struct {
 	Limit            int
 }
 
+// ReceiptPartySummary is the counterparty (customer or supplier) shown on
+// a receipt — only one of Customer/Supplier is ever populated on
+// ReceiptSummary, matching the transaction's type.
+type ReceiptPartySummary struct {
+	Name    string
+	Phone   string
+	Address string
+}
+
+// ReceiptStoreSummary is the shop's own display data, sourced from
+// settings (shop_name/shop_address/shop_phone) — never hardcoded, since a
+// store's details can change.
+type ReceiptStoreSummary struct {
+	Name    string
+	Address string
+	Phone   string
+}
+
+type ReceiptSummary struct {
+	TransactionSummary
+	Customer   *ReceiptPartySummary
+	Supplier   *ReceiptPartySummary
+	Store      ReceiptStoreSummary
+	InvoiceURL string
+}
+
 type TransactionListResult struct {
 	Items      []TransactionSummary // header-only: Items field left nil
 	Page       int
@@ -107,6 +133,7 @@ type TransactionService interface {
 	CreateBuy(ctx context.Context, input CreateBuyInput) (TransactionSummary, error)
 	ListByCustomer(ctx context.Context, input ListCustomerTransactionsInput) (TransactionListResult, error)
 	Get(ctx context.Context, publicID string) (TransactionSummary, error)
+	GetReceipt(ctx context.Context, publicID string) (ReceiptSummary, error)
 }
 
 type transactionService struct {
@@ -116,6 +143,7 @@ type transactionService struct {
 	customerRepo    repository.CustomerRepository
 	supplierRepo    repository.SupplierRepository
 	userRepo        repository.UserRepository
+	settingsRepo    repository.SettingsRepository
 }
 
 func NewTransactionService(
@@ -125,6 +153,7 @@ func NewTransactionService(
 	customerRepo repository.CustomerRepository,
 	supplierRepo repository.SupplierRepository,
 	userRepo repository.UserRepository,
+	settingsRepo repository.SettingsRepository,
 ) TransactionService {
 	return &transactionService{
 		transactionRepo: transactionRepo,
@@ -133,6 +162,7 @@ func NewTransactionService(
 		customerRepo:    customerRepo,
 		supplierRepo:    supplierRepo,
 		userRepo:        userRepo,
+		settingsRepo:    settingsRepo,
 	}
 }
 
@@ -455,4 +485,98 @@ func (s *transactionService) Get(ctx context.Context, publicID string) (Transact
 		CreatedAt:       transaction.CreatedAt,
 		CompletedAt:     transaction.CompletedAt,
 	}, nil
+}
+
+// receiptShopSettingKeys are the settings rows read for a receipt's store
+// section — kept as a var so GetReceipt's single lookup call stays readable.
+var receiptShopSettingKeys = []string{"shop_name", "shop_address", "shop_phone"}
+
+// GetReceipt returns a transaction's full struk payload (BE-1001) —
+// snapshotted items (same as Get), plus the counterparty's display data and
+// the shop's own details from settings. invoice_url is cached on the
+// transaction on first call: it's just a canonical reference to this same
+// endpoint, not a stored file — PDF rendering and printing are entirely
+// the FE print-agent's responsibility.
+func (s *transactionService) GetReceipt(ctx context.Context, publicID string) (ReceiptSummary, error) {
+	transaction, items, err := s.transactionRepo.FindReceiptByPublicID(ctx, publicID)
+	if err != nil {
+		if errors.Is(err, repository.ErrTransactionNotFound) {
+			return ReceiptSummary{}, apperror.NotFound("transaksi tidak ditemukan", nil)
+		}
+		return ReceiptSummary{}, apperror.Internal("failed to fetch transaction", err)
+	}
+
+	var customer *ReceiptPartySummary
+	if transaction.CustomerName != nil {
+		customer = &ReceiptPartySummary{
+			Name:    *transaction.CustomerName,
+			Phone:   stringOrEmpty(transaction.CustomerPhone),
+			Address: stringOrEmpty(transaction.CustomerAddress),
+		}
+	}
+	var supplier *ReceiptPartySummary
+	if transaction.SupplierName != nil {
+		supplier = &ReceiptPartySummary{
+			Name:    *transaction.SupplierName,
+			Phone:   stringOrEmpty(transaction.SupplierPhone),
+			Address: stringOrEmpty(transaction.SupplierAddress),
+		}
+	}
+
+	invoiceURL := transaction.InvoiceURL
+	if invoiceURL == nil {
+		generated := "/api/transactions/" + transaction.PublicID + "/receipt"
+		if err := s.transactionRepo.SetInvoiceURL(ctx, transaction.ID, generated); err != nil {
+			return ReceiptSummary{}, apperror.Internal("failed to cache invoice url", err)
+		}
+		invoiceURL = &generated
+	}
+
+	shopSettings, err := s.settingsRepo.GetByKeys(ctx, receiptShopSettingKeys)
+	if err != nil {
+		return ReceiptSummary{}, apperror.Internal("failed to fetch shop settings", err)
+	}
+
+	itemSummaries := make([]TransactionItemSummary, 0, len(items))
+	for _, it := range items {
+		itemSummaries = append(itemSummaries, TransactionItemSummary{
+			PublicID:          it.PublicID,
+			StockItemPublicID: it.StockItemPublicID,
+			Barcode:           it.Barcode,
+			ProductName:       it.ProductName,
+			WeightGram:        it.WeightGram,
+			PricePerGram:      it.PricePerGram,
+			PriceTotal:        it.PriceTotal,
+		})
+	}
+
+	return ReceiptSummary{
+		TransactionSummary: TransactionSummary{
+			PublicID:        transaction.PublicID,
+			TransactionCode: transaction.TransactionCode,
+			Type:            transaction.Type,
+			TotalAmount:     transaction.TotalAmount,
+			TotalWeight:     transaction.TotalWeight,
+			PaymentMethod:   transaction.PaymentMethod,
+			Status:          transaction.Status,
+			Items:           itemSummaries,
+			CreatedAt:       transaction.CreatedAt,
+			CompletedAt:     transaction.CompletedAt,
+		},
+		Customer: customer,
+		Supplier: supplier,
+		Store: ReceiptStoreSummary{
+			Name:    shopSettings["shop_name"],
+			Address: shopSettings["shop_address"],
+			Phone:   shopSettings["shop_phone"],
+		},
+		InvoiceURL: *invoiceURL,
+	}, nil
+}
+
+func stringOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
