@@ -181,3 +181,12 @@ func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode
 }
+
+// isUniqueViolationOnConstraint reports whether err is a unique-violation
+// on the specific named constraint — lets callers distinguish which of
+// several UNIQUE constraints on the same table fired (e.g. barcode vs
+// serial_number on stock_items).
+func isUniqueViolationOnConstraint(err error, constraint string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode && pgErr.ConstraintName == constraint
+}

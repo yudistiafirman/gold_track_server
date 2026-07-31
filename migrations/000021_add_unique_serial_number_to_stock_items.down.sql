@@ -1,0 +1,1 @@
+ALTER TABLE stock_items DROP CONSTRAINT uq_stock_items_serial_number;

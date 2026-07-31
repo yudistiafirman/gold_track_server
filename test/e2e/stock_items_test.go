@@ -221,6 +221,21 @@ func TestStockItems_CreateProductNotFound(t *testing.T) {
 	}
 }
 
+func TestStockItems_CreateDuplicateSerialNumberRejected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+
+	createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "SN-DUP"}))
+
+	status, resp := doRequest(t, http.MethodPost, "/api/products/"+product.ID+"/stock-items",
+		validStockItemBody(map[string]any{"serial_number": "SN-DUP"}), adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 for duplicate serial_number, got %d (resp=%+v)", status, resp)
+	}
+}
+
 // --- BE-502: list & detail ---
 
 func TestStockItems_ListRequiresAuth(t *testing.T) {

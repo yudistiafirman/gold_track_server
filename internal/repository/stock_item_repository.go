@@ -24,6 +24,13 @@ var ErrBarcodeGenerationFailed = errors.New("failed to generate a unique barcode
 // ErrStockItemNotFound is returned when no stock item matches the lookup.
 var ErrStockItemNotFound = errors.New("stock item not found")
 
+// ErrSerialNumberTaken signals a unique-violation on stock_items.serial_number
+// — unlike ErrBarcodeConflict, this is never retried: a duplicate serial
+// number is a genuine client error, not a race to recompute past.
+var ErrSerialNumberTaken = errors.New("serial number already in use")
+
+const uqStockItemsSerialNumber = "uq_stock_items_serial_number"
+
 const createStockItemMaxAttempts = 5
 
 // StockItemWithRefs is a stock item joined with its product's identity —
@@ -125,6 +132,9 @@ func (r *stockItemRepository) tryCreate(ctx context.Context, s *model.StockItem,
 	err = tx.QueryRow(ctx, insertQuery, s.ProductID, barcode, s.SerialNumber, s.Condition, s.PurchasePrice, s.PurchaseDate, s.Status, s.Notes, s.CreatedBy).
 		Scan(&s.ID, &s.PublicID, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
+		if isUniqueViolationOnConstraint(err, uqStockItemsSerialNumber) {
+			return nil, ErrSerialNumberTaken
+		}
 		if isUniqueViolation(err) {
 			return nil, ErrBarcodeConflict
 		}

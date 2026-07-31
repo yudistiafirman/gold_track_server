@@ -165,6 +165,9 @@ func (s *stockItemService) Create(ctx context.Context, input CreateStockItemInpu
 
 	created, err := s.stockItemRepo.CreateWithGeneratedBarcode(ctx, stockItem, barcodePrefix)
 	if err != nil {
+		if errors.Is(err, repository.ErrSerialNumberTaken) {
+			return StockItemSummary{}, apperror.Conflict("serial_number sudah dipakai", nil)
+		}
 		if errors.Is(err, repository.ErrBarcodeGenerationFailed) {
 			return StockItemSummary{}, apperror.Conflict("gagal membuat barcode unik, coba lagi", nil)
 		}

@@ -24,6 +24,8 @@ func NewTransactionHandler(transactionService service.TransactionService) *Trans
 // leak to a cashier-facing client.
 type transactionItemResponse struct {
 	ID           string  `json:"id"`
+	StockItemID  string  `json:"stock_item_id"`
+	Barcode      string  `json:"barcode"`
 	ProductName  string  `json:"product_name"`
 	WeightGram   float64 `json:"weight_gram"`
 	PricePerGram float64 `json:"price_per_gram"`
@@ -48,6 +50,8 @@ func toTransactionResponse(t service.TransactionSummary) transactionResponse {
 	for _, it := range t.Items {
 		items = append(items, transactionItemResponse{
 			ID:           it.PublicID,
+			StockItemID:  it.StockItemPublicID,
+			Barcode:      it.Barcode,
 			ProductName:  it.ProductName,
 			WeightGram:   it.WeightGram,
 			PricePerGram: it.PricePerGram,
@@ -69,9 +73,12 @@ func toTransactionResponse(t service.TransactionSummary) transactionResponse {
 }
 
 type createTransactionItemRequest struct {
-	StockItemID string  `json:"stock_item_id"`
-	PriceTotal  float64 `json:"price_total"`
-	Confirmed   bool    `json:"confirmed"`
+	StockItemID  string  `json:"stock_item_id"` // SELL / SELL_SUPPLIER
+	ProductID    string  `json:"product_id"`    // BUY
+	SerialNumber string  `json:"serial_number"` // BUY
+	Condition    string  `json:"condition"`     // BUY
+	PriceTotal   float64 `json:"price_total"`   // all types
+	Confirmed    bool    `json:"confirmed"`     // SELL only
 }
 
 type createTransactionRequest struct {
@@ -97,25 +104,47 @@ func (h *TransactionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items := make([]service.CreateSaleItemInput, 0, len(req.Items))
-	for _, it := range req.Items {
-		items = append(items, service.CreateSaleItemInput{
-			StockItemPublicID: it.StockItemID,
-			PriceTotal:        it.PriceTotal,
-			Confirmed:         it.Confirmed,
+	var result service.TransactionSummary
+	var err error
+
+	if req.Type == "BUY" {
+		items := make([]service.CreateBuyItemInput, 0, len(req.Items))
+		for _, it := range req.Items {
+			items = append(items, service.CreateBuyItemInput{
+				ProductPublicID: it.ProductID,
+				SerialNumber:    it.SerialNumber,
+				Condition:       it.Condition,
+				PriceTotal:      it.PriceTotal,
+			})
+		}
+		result, err = h.transactionService.CreateBuy(r.Context(), service.CreateBuyInput{
+			CustomerPublicID:  req.CustomerID,
+			PaymentMethod:     req.PaymentMethod,
+			PaymentRef:        req.PaymentRef,
+			Notes:             req.Notes,
+			Items:             items,
+			CreatedByPublicID: claims.UserID,
+		})
+	} else {
+		items := make([]service.CreateSaleItemInput, 0, len(req.Items))
+		for _, it := range req.Items {
+			items = append(items, service.CreateSaleItemInput{
+				StockItemPublicID: it.StockItemID,
+				PriceTotal:        it.PriceTotal,
+				Confirmed:         it.Confirmed,
+			})
+		}
+		result, err = h.transactionService.CreateSale(r.Context(), service.CreateSaleInput{
+			Type:              req.Type,
+			CustomerPublicID:  req.CustomerID,
+			SupplierPublicID:  req.SupplierID,
+			PaymentMethod:     req.PaymentMethod,
+			PaymentRef:        req.PaymentRef,
+			Notes:             req.Notes,
+			Items:             items,
+			CreatedByPublicID: claims.UserID,
 		})
 	}
-
-	result, err := h.transactionService.CreateSale(r.Context(), service.CreateSaleInput{
-		Type:              req.Type,
-		CustomerPublicID:  req.CustomerID,
-		SupplierPublicID:  req.SupplierID,
-		PaymentMethod:     req.PaymentMethod,
-		PaymentRef:        req.PaymentRef,
-		Notes:             req.Notes,
-		Items:             items,
-		CreatedByPublicID: claims.UserID,
-	})
 	if err != nil {
 		response.Error(w, err)
 		return
