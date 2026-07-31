@@ -536,11 +536,12 @@ Contoh response error:
 ### /api/customers — CRUD pelanggan (role split: create/read vs edit/delete)
 
 ```bash
-GET    /api/customers        # ?search=&page=&limit=                              -> 200 (ADMIN, KASIR, SUPER_ADMIN)
-POST   /api/customers        # { name, phone?, email?, id_type?, id_number?, address?, notes? } -> 201 (ADMIN, KASIR, SUPER_ADMIN)
-GET    /api/customers/{id}   # detail pelanggan                                     -> 200 / 404 (ADMIN, KASIR, SUPER_ADMIN)
-PUT    /api/customers/{id}   # field yang sama + is_active                          -> 200 / 404 (ADMIN & SUPER_ADMIN)
-DELETE /api/customers/{id}   # soft delete (is_active=false)                        -> 200 / 404 (ADMIN & SUPER_ADMIN)
+GET    /api/customers                 # ?search=&page=&limit=                              -> 200 (ADMIN, KASIR, SUPER_ADMIN)
+POST   /api/customers                 # { name, phone?, email?, id_type?, id_number?, address?, notes? } -> 201 (ADMIN, KASIR, SUPER_ADMIN)
+GET    /api/customers/{id}            # detail pelanggan                                     -> 200 / 404 (ADMIN, KASIR, SUPER_ADMIN)
+GET    /api/customers/{id}/transactions  # riwayat transaksi SELL & BUY, ?page=&limit=        -> 200 / 404 (semua role, token valid)
+PUT    /api/customers/{id}            # field yang sama + is_active                          -> 200 / 404 (ADMIN & SUPER_ADMIN)
+DELETE /api/customers/{id}            # soft delete (is_active=false)                        -> 200 / 404 (ADMIN & SUPER_ADMIN)
 ```
 
 **Satu-satunya resource di API ini dengan role berbeda per operasi**: `POST`/`GET` (create & read)
@@ -589,6 +590,52 @@ Contoh response error:
 // 404 — public_id valid tapi tidak ada
 {"success":false,"error":{"code":"NOT_FOUND","message":"pelanggan tidak ditemukan"}}
 ```
+
+#### GET /api/customers/{id}/transactions — riwayat transaksi pelanggan (BE-602)
+
+Terbuka buat semua role (token valid) — bukan cuma admin/kasir, sama seperti `GET /api/products`.
+Menggabungkan transaksi `type=SELL` dan `type=BUY` milik pelanggan itu (`type=SELL_SUPPLIER` tidak
+pernah punya `customer_id`, jadi otomatis tidak ikut, tapi filternya tetap eksplisit
+`customer_id = ? AND type IN ('SELL','BUY')` di query). Urut **terbaru duluan**
+(`ORDER BY created_at DESC`), paginated (`?page=`/`?limit=`, default & cap sama seperti list
+lainnya). Baris di list ini **cuma header** (tanpa `items[]`) — buat detail lengkap tiap transaksi
+(termasuk item-item buat struk), lihat `GET /api/transactions/{id}` di bawah, yang linknya
+langsung dari `id` tiap baris di list ini.
+
+Contoh response (200):
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "4d5e6f70-8192-0334-def0-123456789012",
+        "transaction_code": "TRX-20260731-0002",
+        "type": "BUY",
+        "total_amount": 900000,
+        "total_weight": 10,
+        "payment_method": "CASH",
+        "status": "COMPLETED",
+        "created_at": "2026-07-31T09:05:00Z",
+        "completed_at": "2026-07-31T09:05:00Z"
+      },
+      {
+        "id": "2b3c4d5e-6f70-8901-bcde-f01234567890",
+        "transaction_code": "TRX-20260731-0001",
+        "type": "SELL",
+        "total_amount": 1500000,
+        "total_weight": 10,
+        "payment_method": "CASH",
+        "status": "COMPLETED",
+        "created_at": "2026-07-31T09:00:00Z",
+        "completed_at": "2026-07-31T09:00:00Z"
+      }
+    ],
+    "pagination": { "page": 1, "limit": 20, "total": 2, "total_pages": 1 }
+  }
+}
+```
+`{id}` yang bukan pelanggan valid → 404 (`"pelanggan tidak ditemukan"`).
 
 ### /api/products/{productId}/stock-items & /api/stock-items — unit stok fisik
 
@@ -723,10 +770,11 @@ Contoh response error:
 {"success":false,"error":{"code":"NOT_FOUND","message":"unit stok tidak ditemukan"}}
 ```
 
-### POST /api/transactions — checkout penjualan & buyback (BE-702/BE-703/BE-801)
+### /api/transactions — checkout penjualan & buyback (BE-602/BE-702/BE-703/BE-801)
 
 ```bash
-POST /api/transactions   # semua role, token valid
+POST /api/transactions        # semua role, token valid                                -> 201
+GET  /api/transactions/{id}   # detail lengkap (dengan items[]) — struk, SELL maupun BUY -> 200 / 404 (semua role, token valid)
 ```
 
 Tiga `type` didukung: `SELL` (jual ke pelanggan), `SELL_SUPPLIER` (jual ke supplier), `BUY`
@@ -903,6 +951,14 @@ Contoh response error:
 // 409 — BUY, serial_number sudah dipakai (unit lain, atau item lain di batch yang sama)
 {"success":false,"error":{"code":"CONFLICT","message":"serial_number sudah dipakai"}}
 ```
+
+#### GET /api/transactions/{id} — detail transaksi / struk (BE-602)
+
+Response-nya **objek yang sama persis** dengan response `POST /api/transactions` (fungsi mapping
+`toTransactionResponse` yang sama dipakai keduanya) — lengkap dengan `items[]`
+(`stock_item_id`/`barcode` per item buat cetak label ulang kalau perlu), tanpa `cogs`. Berlaku
+buat transaksi `SELL`, `SELL_SUPPLIER`, maupun `BUY`. `{id}` tidak ditemukan → 404
+(`"transaksi tidak ditemukan"`); bukan format UUID → 400.
 
 ## Middleware JWT & role (internal/middleware/auth.go)
 
@@ -1085,6 +1141,10 @@ Dua lapis test:
 - List: `?search=` cocok ke `name` **atau** `phone`; `?limit=&page=` paginasi dengan benar
 - List: pelanggan yang diarsipkan **tetap** muncul di list (sama seperti `/api/suppliers`)
 - Get dengan id bukan UUID → 400; UUID valid tapi tidak ada → 404
+- Skenario `GET /api/customers/{id}/transactions` (riwayat, BE-602) ada di `transactions_test.go`,
+  bukan di sini — lihat di bawah, karena endpoint ini secara implementasi di-handle oleh
+  `TransactionHandler`, bukan `CustomerHandler` (sama alasan `ListByProduct` ada di
+  `StockItemHandler`, bukan `ProductHandler`).
 
 **`stock_items_test.go`** (tambahan) — `GET /api/stock-items/lookup` (BE-701/BE-703)
 - Tanpa token → 401
@@ -1125,6 +1185,13 @@ Dua lapis test:
 - `BUY` `serial_number` yang sudah dipakai unit lain (dibuat sebelumnya) → 409
 - `BUY` `serial_number` kosong / `condition` invalid → 422; `price_total <= 0` → 400
 - `BUY` tanpa `customer_id` → 400; `product_id` tidak ditemukan → 404; produk diarsipkan → 400
+- `GET /api/customers/{id}/transactions` (BE-602): tanpa token → 401; `{id}` pelanggan tidak
+  ditemukan → 404; menggabungkan `SELL` **dan** `BUY` milik pelanggan yang sama; transaksi milik
+  pelanggan lain tidak ikut ke-list; urut **terbaru duluan** (dicek pakai urutan
+  `transaction_code`, bukan timestamp mentah); `?limit=&page=` paginasi dengan benar
+- `GET /api/transactions/{id}` (BE-602): detail lengkap dengan `items[]` (`stock_item_id`/`barcode`
+  ikut kebawa) sama persis kayak response `POST`, berlaku buat `SELL` maupun `BUY`, tanpa `cogs`;
+  tidak ditemukan → 404; format id bukan UUID → 400
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta

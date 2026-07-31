@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -18,6 +19,21 @@ type transactionItemDTO struct {
 	WeightGram   float64 `json:"weight_gram"`
 	PricePerGram float64 `json:"price_per_gram"`
 	PriceTotal   float64 `json:"price_total"`
+}
+
+type transactionSummaryDTO struct {
+	ID              string  `json:"id"`
+	TransactionCode string  `json:"transaction_code"`
+	Type            string  `json:"type"`
+	TotalAmount     float64 `json:"total_amount"`
+	TotalWeight     float64 `json:"total_weight"`
+	PaymentMethod   string  `json:"payment_method"`
+	Status          string  `json:"status"`
+}
+
+type transactionListDTO struct {
+	Items      []transactionSummaryDTO `json:"items"`
+	Pagination paginationDTO           `json:"pagination"`
 }
 
 type transactionDTO struct {
@@ -610,6 +626,258 @@ func TestTransactions_BuyProductArchivedRejected(t *testing.T) {
 	status, resp = doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
 		{"product_id": product.ID, "serial_number": "BUY-SN-X", "condition": "GOOD", "price_total": 900000},
 	}), adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
+	}
+}
+
+// --- BE-602: customer transaction history + transaction detail ---
+
+func TestTransactions_CustomerHistoryRequiresAuth(t *testing.T) {
+	resetDB(t)
+
+	status, _ := doRequest(t, http.MethodGet, "/api/customers/"+nonexistentUUID+"/transactions", nil, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", status)
+	}
+}
+
+func TestTransactions_CustomerHistoryCombinesSellAndBuy(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	buyStatus, buyResp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "HIST-BUY-1", "condition": "GOOD", "price_total": 900000},
+	}), adminToken)
+	if buyStatus != http.StatusCreated {
+		t.Fatalf("buy: expected 201, got %d (resp=%+v)", buyStatus, buyResp)
+	}
+	var buyTx transactionDTO
+	decodeData(t, buyResp, &buyTx)
+
+	sellItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "HIST-SELL-1"}))
+	sellStatus, sellResp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": sellItem.ID, "price_total": 1200000},
+	}), adminToken)
+	if sellStatus != http.StatusCreated {
+		t.Fatalf("sell: expected 201, got %d (resp=%+v)", sellStatus, sellResp)
+	}
+	var sellTx transactionDTO
+	decodeData(t, sellResp, &sellTx)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/customers/"+customer.ID+"/transactions", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var list transactionListDTO
+	decodeData(t, resp, &list)
+	if list.Pagination.Total != 2 {
+		t.Fatalf("expected total=2, got %d", list.Pagination.Total)
+	}
+	foundBuy, foundSell := false, false
+	for _, tx := range list.Items {
+		if tx.ID == buyTx.ID && tx.Type == "BUY" {
+			foundBuy = true
+		}
+		if tx.ID == sellTx.ID && tx.Type == "SELL" {
+			foundSell = true
+		}
+	}
+	if !foundBuy || !foundSell {
+		t.Fatalf("expected both BUY and SELL in history, got %+v", list.Items)
+	}
+}
+
+func TestTransactions_CustomerHistoryExcludesOtherCustomers(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customerA := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+	customerB := createCustomer(t, adminToken, map[string]any{"name": "Siti Aminah"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customerB.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "OTHER-CUST-1", "condition": "GOOD", "price_total": 900000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/customers/"+customerA.ID+"/transactions", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var list transactionListDTO
+	decodeData(t, resp, &list)
+	if list.Pagination.Total != 0 {
+		t.Fatalf("expected customer A history empty, got total=%d", list.Pagination.Total)
+	}
+}
+
+func TestTransactions_CustomerHistoryOrderedNewestFirst(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	var codes []string
+	for i := 0; i < 3; i++ {
+		status, resp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+			{"product_id": product.ID, "serial_number": fmt.Sprintf("ORDER-SN-%d", i), "condition": "GOOD", "price_total": 900000},
+		}), adminToken)
+		if status != http.StatusCreated {
+			t.Fatalf("create %d: expected 201, got %d (resp=%+v)", i, status, resp)
+		}
+		var tx transactionDTO
+		decodeData(t, resp, &tx)
+		codes = append(codes, tx.TransactionCode)
+	}
+
+	status, resp := doRequest(t, http.MethodGet, "/api/customers/"+customer.ID+"/transactions", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var list transactionListDTO
+	decodeData(t, resp, &list)
+	if len(list.Items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(list.Items))
+	}
+	// Newest first: the last transaction created (codes[2]) must appear first.
+	if list.Items[0].TransactionCode != codes[2] || list.Items[2].TransactionCode != codes[0] {
+		t.Fatalf("expected newest-first order %v, got %+v", codes, list.Items)
+	}
+}
+
+func TestTransactions_CustomerHistoryPagination(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	for i := 0; i < 3; i++ {
+		status, resp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+			{"product_id": product.ID, "serial_number": fmt.Sprintf("PAGE-SN-%d", i), "condition": "GOOD", "price_total": 900000},
+		}), adminToken)
+		if status != http.StatusCreated {
+			t.Fatalf("create %d: expected 201, got %d (resp=%+v)", i, status, resp)
+		}
+	}
+
+	status, resp := doRequest(t, http.MethodGet, "/api/customers/"+customer.ID+"/transactions?limit=2&page=1", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("page 1: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var page1 transactionListDTO
+	decodeData(t, resp, &page1)
+	if len(page1.Items) != 2 || page1.Pagination.Total != 3 || page1.Pagination.TotalPages != 2 {
+		t.Fatalf("page 1: expected 2 items total=3 total_pages=2, got %d items %+v", len(page1.Items), page1.Pagination)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/customers/"+customer.ID+"/transactions?limit=2&page=2", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("page 2: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var page2 transactionListDTO
+	decodeData(t, resp, &page2)
+	if len(page2.Items) != 1 {
+		t.Fatalf("page 2: expected 1 item, got %d", len(page2.Items))
+	}
+}
+
+func TestTransactions_CustomerHistoryCustomerNotFound(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/customers/"+nonexistentUUID+"/transactions", nil, adminToken)
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestTransactions_GetDetailReturnsFullItems(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var created transactionDTO
+	decodeData(t, resp, &created)
+
+	status, resp = doRequest(t, http.MethodGet, "/api/transactions/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched transactionDTO
+	decodeData(t, resp, &fetched)
+	if fetched.TransactionCode != created.TransactionCode || len(fetched.Items) != 1 {
+		t.Fatalf("expected full detail matching create response, got %+v", fetched)
+	}
+	if fetched.Items[0].StockItemID != stockItem.ID || fetched.Items[0].Barcode != stockItem.Barcode {
+		t.Fatalf("expected item stock_item_id/barcode populated, got %+v", fetched.Items[0])
+	}
+	if strings.Contains(strings.ToLower(string(resp.Data)), "cogs") {
+		t.Fatalf("detail response must never include cogs, got raw data: %s", resp.Data)
+	}
+}
+
+func TestTransactions_GetDetailWorksForBuyToo(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "DETAIL-BUY-SN", "condition": "GOOD", "price_total": 900000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var created transactionDTO
+	decodeData(t, resp, &created)
+
+	status, resp = doRequest(t, http.MethodGet, "/api/transactions/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched transactionDTO
+	decodeData(t, resp, &fetched)
+	if fetched.Type != "BUY" || len(fetched.Items) != 1 {
+		t.Fatalf("expected BUY detail with 1 item, got %+v", fetched)
+	}
+}
+
+func TestTransactions_GetNotFound(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/transactions/"+nonexistentUUID, nil, adminToken)
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestTransactions_GetInvalidIDFormat(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/transactions/1", nil, adminToken)
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
 	}

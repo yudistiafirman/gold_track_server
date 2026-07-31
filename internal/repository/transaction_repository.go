@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"gold-track-be/internal/model"
@@ -30,8 +31,43 @@ var ErrTransactionCodeConflict = errors.New("transaction code conflict")
 // its retry budget without landing a unique transaction_code.
 var ErrTransactionCodeGenerationFailed = errors.New("failed to generate a unique transaction code")
 
+// ErrTransactionNotFound is returned when no transaction matches the lookup.
+var ErrTransactionNotFound = errors.New("transaction not found")
+
 const createSaleMaxAttempts = 5
 const createBuyMaxAttempts = 5
+
+const transactionColumns = `
+	id, public_id::text, transaction_code, type, customer_id, supplier_id,
+	total_amount::float8, total_weight::float8, payment_method, payment_ref,
+	gold_price_id, notes, invoice_url, status, created_by, created_at, completed_at
+`
+
+const transactionItemColumns = `
+	ti.id, ti.public_id::text, ti.transaction_id, ti.stock_item_id, ti.product_name,
+	ti.weight_gram::float8, ti.price_per_gram::float8, ti.price_total::float8, ti.cogs::float8, ti.created_at,
+	si.public_id::text, si.barcode
+`
+
+const transactionItemFrom = `
+	FROM transaction_items ti
+	JOIN stock_items si ON si.id = ti.stock_item_id
+`
+
+// TransactionItemWithStockRef is a transaction_item joined with its stock
+// item's identity — the detail/struk view needs the barcode/public_id, not
+// just the internal FK, without a second round trip per row.
+type TransactionItemWithStockRef struct {
+	model.TransactionItem
+	StockItemPublicID string
+	Barcode           string
+}
+
+// TransactionFilter narrows TransactionRepository.ListByCustomer.
+type TransactionFilter struct {
+	Page  int
+	Limit int
+}
 
 // SaleItemInput is one scanned unit going into a sale — StockItemID is the
 // internal id, already resolved from the client-supplied public_id by the
@@ -95,6 +131,14 @@ type TransactionRepository interface {
 	// transaction header, and every transaction_items row — all in one DB
 	// transaction.
 	CreateBuy(ctx context.Context, input CreateBuyInput) (*model.Transaction, []BuyItemResult, error)
+	// ListByCustomer returns header-only transaction rows (type SELL/BUY)
+	// for one customer, newest first, plus the total count ignoring
+	// pagination.
+	ListByCustomer(ctx context.Context, customerID int64, filter TransactionFilter) ([]model.Transaction, int, error)
+	// FindByPublicID returns one transaction with its full
+	// transaction_items (each joined with its stock item's public_id/barcode),
+	// regardless of type — used for the detail/struk view.
+	FindByPublicID(ctx context.Context, publicID string) (*model.Transaction, []TransactionItemWithStockRef, error)
 }
 
 type transactionRepository struct {
@@ -403,4 +447,83 @@ func (r *transactionRepository) tryBuy(ctx context.Context, input CreateBuyInput
 	}
 
 	return transaction, results, nil
+}
+
+func scanTransaction(row pgx.Row, t *model.Transaction) error {
+	return row.Scan(
+		&t.ID, &t.PublicID, &t.TransactionCode, &t.Type, &t.CustomerID, &t.SupplierID,
+		&t.TotalAmount, &t.TotalWeight, &t.PaymentMethod, &t.PaymentRef,
+		&t.GoldPriceID, &t.Notes, &t.InvoiceURL, &t.Status, &t.CreatedBy, &t.CreatedAt, &t.CompletedAt,
+	)
+}
+
+func scanTransactionItemWithStockRef(row pgx.Row, it *TransactionItemWithStockRef) error {
+	return row.Scan(
+		&it.ID, &it.PublicID, &it.TransactionID, &it.StockItemID, &it.ProductName,
+		&it.WeightGram, &it.PricePerGram, &it.PriceTotal, &it.COGS, &it.CreatedAt,
+		&it.StockItemPublicID, &it.Barcode,
+	)
+}
+
+func (r *transactionRepository) ListByCustomer(ctx context.Context, customerID int64, filter TransactionFilter) ([]model.Transaction, int, error) {
+	const where = `WHERE customer_id = $1 AND type IN ('SELL', 'BUY')`
+
+	var total int
+	if err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM transactions `+where, customerID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count customer transactions: %w", err)
+	}
+
+	query := `SELECT ` + transactionColumns + ` FROM transactions ` + where +
+		` ORDER BY created_at DESC LIMIT $2 OFFSET $3`
+	rows, err := r.db.Query(ctx, query, customerID, filter.Limit, (filter.Page-1)*filter.Limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list customer transactions: %w", err)
+	}
+	defer rows.Close()
+
+	var transactions []model.Transaction
+	for rows.Next() {
+		var t model.Transaction
+		if err := scanTransaction(rows, &t); err != nil {
+			return nil, 0, fmt.Errorf("scan transaction row: %w", err)
+		}
+		transactions = append(transactions, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("list customer transactions: %w", err)
+	}
+	return transactions, total, nil
+}
+
+func (r *transactionRepository) FindByPublicID(ctx context.Context, publicID string) (*model.Transaction, []TransactionItemWithStockRef, error) {
+	query := `SELECT ` + transactionColumns + ` FROM transactions WHERE public_id = $1`
+
+	var t model.Transaction
+	if err := scanTransaction(r.db.QueryRow(ctx, query, publicID), &t); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, ErrTransactionNotFound
+		}
+		return nil, nil, fmt.Errorf("find transaction by public id: %w", err)
+	}
+
+	itemsQuery := `SELECT ` + transactionItemColumns + transactionItemFrom + `WHERE ti.transaction_id = $1 ORDER BY ti.id`
+	rows, err := r.db.Query(ctx, itemsQuery, t.ID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list transaction items: %w", err)
+	}
+	defer rows.Close()
+
+	var items []TransactionItemWithStockRef
+	for rows.Next() {
+		var it TransactionItemWithStockRef
+		if err := scanTransactionItemWithStockRef(rows, &it); err != nil {
+			return nil, nil, fmt.Errorf("scan transaction item row: %w", err)
+		}
+		items = append(items, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("list transaction items: %w", err)
+	}
+
+	return &t, items, nil
 }

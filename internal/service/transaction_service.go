@@ -3,11 +3,18 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
 	"gold-track-be/internal/repository"
 	"gold-track-be/pkg/apperror"
+)
+
+const (
+	defaultTransactionPage  = 1
+	defaultTransactionLimit = 20
+	maxTransactionLimit     = 100
 )
 
 var allowedTransactionTypes = map[string]struct{}{
@@ -81,9 +88,25 @@ type CreateBuyInput struct {
 	CreatedByPublicID string
 }
 
+type ListCustomerTransactionsInput struct {
+	CustomerPublicID string
+	Page             int
+	Limit            int
+}
+
+type TransactionListResult struct {
+	Items      []TransactionSummary // header-only: Items field left nil
+	Page       int
+	Limit      int
+	Total      int
+	TotalPages int
+}
+
 type TransactionService interface {
 	CreateSale(ctx context.Context, input CreateSaleInput) (TransactionSummary, error)
 	CreateBuy(ctx context.Context, input CreateBuyInput) (TransactionSummary, error)
+	ListByCustomer(ctx context.Context, input ListCustomerTransactionsInput) (TransactionListResult, error)
+	Get(ctx context.Context, publicID string) (TransactionSummary, error)
 }
 
 type transactionService struct {
@@ -328,6 +351,95 @@ func (s *transactionService) CreateBuy(ctx context.Context, input CreateBuyInput
 			WeightGram:        r.TransactionItem.WeightGram,
 			PricePerGram:      r.TransactionItem.PricePerGram,
 			PriceTotal:        r.TransactionItem.PriceTotal,
+		})
+	}
+
+	return TransactionSummary{
+		PublicID:        transaction.PublicID,
+		TransactionCode: transaction.TransactionCode,
+		Type:            transaction.Type,
+		TotalAmount:     transaction.TotalAmount,
+		TotalWeight:     transaction.TotalWeight,
+		PaymentMethod:   transaction.PaymentMethod,
+		Status:          transaction.Status,
+		Items:           itemSummaries,
+		CreatedAt:       transaction.CreatedAt,
+		CompletedAt:     transaction.CompletedAt,
+	}, nil
+}
+
+func (s *transactionService) ListByCustomer(ctx context.Context, input ListCustomerTransactionsInput) (TransactionListResult, error) {
+	customer, err := s.customerRepo.FindByPublicID(ctx, input.CustomerPublicID)
+	if err != nil {
+		if errors.Is(err, repository.ErrCustomerNotFound) {
+			return TransactionListResult{}, apperror.NotFound("pelanggan tidak ditemukan", nil)
+		}
+		return TransactionListResult{}, apperror.Internal("failed to fetch customer", err)
+	}
+
+	page := input.Page
+	if page <= 0 {
+		page = defaultTransactionPage
+	}
+	limit := input.Limit
+	if limit <= 0 {
+		limit = defaultTransactionLimit
+	}
+	if limit > maxTransactionLimit {
+		limit = maxTransactionLimit
+	}
+
+	transactions, total, err := s.transactionRepo.ListByCustomer(ctx, customer.ID, repository.TransactionFilter{
+		Page:  page,
+		Limit: limit,
+	})
+	if err != nil {
+		return TransactionListResult{}, apperror.Internal("failed to list customer transactions", err)
+	}
+
+	items := make([]TransactionSummary, 0, len(transactions))
+	for _, t := range transactions {
+		items = append(items, TransactionSummary{
+			PublicID:        t.PublicID,
+			TransactionCode: t.TransactionCode,
+			Type:            t.Type,
+			TotalAmount:     t.TotalAmount,
+			TotalWeight:     t.TotalWeight,
+			PaymentMethod:   t.PaymentMethod,
+			Status:          t.Status,
+			CreatedAt:       t.CreatedAt,
+			CompletedAt:     t.CompletedAt,
+		})
+	}
+
+	return TransactionListResult{
+		Items:      items,
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: int(math.Ceil(float64(total) / float64(limit))),
+	}, nil
+}
+
+func (s *transactionService) Get(ctx context.Context, publicID string) (TransactionSummary, error) {
+	transaction, items, err := s.transactionRepo.FindByPublicID(ctx, publicID)
+	if err != nil {
+		if errors.Is(err, repository.ErrTransactionNotFound) {
+			return TransactionSummary{}, apperror.NotFound("transaksi tidak ditemukan", nil)
+		}
+		return TransactionSummary{}, apperror.Internal("failed to fetch transaction", err)
+	}
+
+	itemSummaries := make([]TransactionItemSummary, 0, len(items))
+	for _, it := range items {
+		itemSummaries = append(itemSummaries, TransactionItemSummary{
+			PublicID:          it.PublicID,
+			StockItemPublicID: it.StockItemPublicID,
+			Barcode:           it.Barcode,
+			ProductName:       it.ProductName,
+			WeightGram:        it.WeightGram,
+			PricePerGram:      it.PricePerGram,
+			PriceTotal:        it.PriceTotal,
 		})
 	}
 

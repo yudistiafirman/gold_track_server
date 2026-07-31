@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	appmw "gold-track-be/internal/middleware"
@@ -151,4 +152,97 @@ func (h *TransactionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.JSON(w, http.StatusCreated, toTransactionResponse(result))
+}
+
+// transactionSummaryResponse is the header-only row used by the customer
+// history list — no nested items, kept light for a paginated view. Full
+// detail (with items) is only ever returned by Create and Get.
+type transactionSummaryResponse struct {
+	ID              string     `json:"id"`
+	TransactionCode string     `json:"transaction_code"`
+	Type            string     `json:"type"`
+	TotalAmount     float64    `json:"total_amount"`
+	TotalWeight     float64    `json:"total_weight"`
+	PaymentMethod   string     `json:"payment_method"`
+	Status          string     `json:"status"`
+	CreatedAt       time.Time  `json:"created_at"`
+	CompletedAt     *time.Time `json:"completed_at"`
+}
+
+func toTransactionSummaryResponse(t service.TransactionSummary) transactionSummaryResponse {
+	return transactionSummaryResponse{
+		ID:              t.PublicID,
+		TransactionCode: t.TransactionCode,
+		Type:            t.Type,
+		TotalAmount:     t.TotalAmount,
+		TotalWeight:     t.TotalWeight,
+		PaymentMethod:   t.PaymentMethod,
+		Status:          t.Status,
+		CreatedAt:       t.CreatedAt,
+		CompletedAt:     t.CompletedAt,
+	}
+}
+
+type transactionListResponse struct {
+	Items      []transactionSummaryResponse `json:"items"`
+	Pagination paginationResponse           `json:"pagination"`
+}
+
+// ListByCustomer returns a customer's SELL/BUY transaction history,
+// newest first — BE-602. Lives on TransactionHandler (not CustomerHandler)
+// even though it nests under /customers/{id}/transactions, same reasoning
+// as StockItemHandler.ListByProduct nesting under /products/{productId}.
+func (h *TransactionHandler) ListByCustomer(w http.ResponseWriter, r *http.Request) {
+	customerID, err := publicIDParam(r)
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+
+	result, err := h.transactionService.ListByCustomer(r.Context(), service.ListCustomerTransactionsInput{
+		CustomerPublicID: customerID,
+		Page:             page,
+		Limit:            limit,
+	})
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	items := make([]transactionSummaryResponse, 0, len(result.Items))
+	for _, t := range result.Items {
+		items = append(items, toTransactionSummaryResponse(t))
+	}
+
+	response.JSON(w, http.StatusOK, transactionListResponse{
+		Items: items,
+		Pagination: paginationResponse{
+			Page:       result.Page,
+			Limit:      result.Limit,
+			Total:      result.Total,
+			TotalPages: result.TotalPages,
+		},
+	})
+}
+
+// Get returns one transaction's full detail (with items) — used for
+// receipt/struk display. Works for both SELL and BUY.
+func (h *TransactionHandler) Get(w http.ResponseWriter, r *http.Request) {
+	id, err := publicIDParam(r)
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	result, err := h.transactionService.Get(r.Context(), id)
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, toTransactionResponse(result))
 }
