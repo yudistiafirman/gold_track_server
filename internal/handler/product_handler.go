@@ -142,6 +142,45 @@ func (h *ProductHandler) List(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type updateProductRequest struct {
+	Name        string  `json:"name"`
+	CategoryID  string  `json:"category_id"`
+	BrandID     string  `json:"brand_id"`
+	WeightGram  float64 `json:"weight_gram"`
+	Description string  `json:"description"`
+	IsActive    bool    `json:"is_active"`
+}
+
+func (h *ProductHandler) Update(w http.ResponseWriter, r *http.Request) {
+	id, err := publicIDParam(r)
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	var req updateProductRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, apperror.BadRequest("invalid request body", err))
+		return
+	}
+
+	result, err := h.productService.Update(r.Context(), service.UpdateProductInput{
+		PublicID:         id,
+		Name:             req.Name,
+		CategoryPublicID: req.CategoryID,
+		BrandPublicID:    req.BrandID,
+		WeightGram:       req.WeightGram,
+		Description:      req.Description,
+		IsActive:         req.IsActive,
+	})
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, toProductResponse(result))
+}
+
 func (h *ProductHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id, err := publicIDParam(r)
 	if err != nil {

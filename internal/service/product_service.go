@@ -68,10 +68,21 @@ type ProductListResult struct {
 	TotalPages int
 }
 
+type UpdateProductInput struct {
+	PublicID         string
+	Name             string
+	CategoryPublicID string
+	BrandPublicID    string
+	WeightGram       float64
+	Description      string
+	IsActive         bool
+}
+
 type ProductService interface {
 	Create(ctx context.Context, input CreateProductInput) (ProductSummary, error)
 	List(ctx context.Context, input ListProductsInput) (ProductListResult, error)
 	Get(ctx context.Context, publicID string) (ProductSummary, error)
+	Update(ctx context.Context, input UpdateProductInput) (ProductSummary, error)
 }
 
 type productService struct {
@@ -225,6 +236,68 @@ func (s *productService) Get(ctx context.Context, publicID string) (ProductSumma
 		return ProductSummary{}, apperror.Internal("failed to fetch product", err)
 	}
 	return toProductSummaryFromRefs(product), nil
+}
+
+func (s *productService) Update(ctx context.Context, input UpdateProductInput) (ProductSummary, error) {
+	name := strings.TrimSpace(input.Name)
+	if err := validateProductFields(name, input.CategoryPublicID, input.BrandPublicID, input.WeightGram); err != nil {
+		return ProductSummary{}, err
+	}
+
+	existing, err := s.productRepo.FindByPublicID(ctx, input.PublicID)
+	if err != nil {
+		if errors.Is(err, repository.ErrProductNotFound) {
+			return ProductSummary{}, apperror.NotFound("produk tidak ditemukan", nil)
+		}
+		return ProductSummary{}, apperror.Internal("failed to fetch product", err)
+	}
+
+	category, err := s.categoryRepo.FindByPublicID(ctx, input.CategoryPublicID)
+	if err != nil {
+		if errors.Is(err, repository.ErrCategoryNotFound) {
+			return ProductSummary{}, apperror.NotFound("kategori tidak ditemukan", nil)
+		}
+		return ProductSummary{}, apperror.Internal("failed to fetch category", err)
+	}
+	if !category.IsActive {
+		return ProductSummary{}, apperror.BadRequest("kategori tidak aktif", nil)
+	}
+
+	brand, err := s.brandRepo.FindByPublicID(ctx, input.BrandPublicID)
+	if err != nil {
+		if errors.Is(err, repository.ErrBrandNotFound) {
+			return ProductSummary{}, apperror.NotFound("brand tidak ditemukan", nil)
+		}
+		return ProductSummary{}, apperror.Internal("failed to fetch brand", err)
+	}
+	if !brand.IsActive {
+		return ProductSummary{}, apperror.BadRequest("brand tidak aktif", nil)
+	}
+
+	var description *string
+	if trimmed := strings.TrimSpace(input.Description); trimmed != "" {
+		description = &trimmed
+	}
+
+	existing.Name = name
+	existing.CategoryID = category.ID
+	existing.BrandID = brand.ID
+	existing.WeightGram = input.WeightGram
+	existing.Description = description
+	existing.IsActive = input.IsActive
+
+	if err := s.productRepo.Update(ctx, &existing.Product); err != nil {
+		if errors.Is(err, repository.ErrProductNotFound) {
+			return ProductSummary{}, apperror.NotFound("produk tidak ditemukan", nil)
+		}
+		return ProductSummary{}, apperror.Internal("failed to update product", err)
+	}
+
+	return toProductSummary(
+		&existing.Product,
+		ProductRef{PublicID: category.PublicID, Name: category.Name},
+		ProductRef{PublicID: brand.PublicID, Name: brand.Name},
+	), nil
 }
 
 func emptyProductList(page, limit int) ProductListResult {

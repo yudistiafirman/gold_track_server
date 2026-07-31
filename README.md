@@ -285,11 +285,12 @@ Catatan:
 POST   /api/products        # { name, category_id, brand_id, weight_gram, description? } -> 201 (ADMIN & SUPER_ADMIN)
 GET    /api/products        # ?search=&category_id=&brand_id=&page=&limit=          -> 200 (semua role, token valid)
 GET    /api/products/{id}   # detail lengkap, termasuk produk yang sudah diarsipkan -> 200 / 404 (semua role, token valid)
+PUT    /api/products/{id}   # { name, category_id, brand_id, weight_gram, description?, is_active } -> 200 / 404 (ADMIN & SUPER_ADMIN)
 ```
 
-`POST` dibatasi `ADMIN`/`SUPER_ADMIN` (role lain → 403); `GET` (list & detail) bisa diakses semua
-role selama tokennya valid — tidak ada `RequireRole` tambahan, cuma perlu login (lihat
-`internal/handler/router.go`: kedua route ini sengaja diletakkan di luar grup `RequireRole`).
+`POST`/`PUT` dibatasi `ADMIN`/`SUPER_ADMIN` (role lain → 403); `GET` (list & detail) bisa diakses
+semua role selama tokennya valid — tidak ada `RequireRole` tambahan, cuma perlu login (lihat
+`internal/handler/router.go`: kedua route `GET` ini sengaja diletakkan di luar grup `RequireRole`).
 
 #### POST /api/products — create dengan SKU auto-generate
 
@@ -333,7 +334,42 @@ Dua produk berikutnya dengan kombinasi kategori+brand+berat yang sama akan dapat
 Catatan:
 - `created_by` diambil dari `claims.UserID` (JWT), bukan dari body — tidak bisa dipalsukan klien.
 - `is_active` selalu `true` saat create, tidak bisa di-set lewat body.
-- Belum ada `PUT`/`DELETE` untuk `/api/products` (ticket terpisah).
+- Belum ada `DELETE` untuk `/api/products` — nonaktifkan/reaktivasi produk lewat `PUT` dengan
+  `is_active` (lihat di bawah).
+
+#### PUT /api/products/{id} — edit produk, SKU tidak berubah
+
+Body-nya **full replace**, sama seperti `PUT` di `/api/users`/`/api/categories`/`/api/brands` —
+klien wajib kirim semua field yang bisa diedit setiap kali (`name`, `category_id`, `brand_id`,
+`weight_gram`, `description`, `is_active`), bukan partial patch. Validasi & aturan
+kategori/brand-nya sama persis dengan `POST` (wajib ada, harus `is_active=true`).
+
+`sku` **tidak pernah** ikut berubah lewat endpoint ini — kolom `sku` sengaja tidak ada di
+query `UPDATE` (`ProductRepository.Update`), jadi walau `name`/`category_id`/`brand_id`/`weight_gram`
+diubah, SKU yang sudah ter-generate saat create tetap sama. `{id}` yang tidak ditemukan → 404.
+Karena body mencakup `is_active`, endpoint ini juga jadi satu-satunya cara mereaktivasi produk yang
+sudah diarsipkan (`is_active: true` → muncul lagi di `GET /api/products`).
+
+Contoh response `PUT /api/products/{id}` (200) — misal produk yang tadinya `BAT-ANT-10-001`
+diubah nama/kategori/brand/beratnya:
+```json
+{
+  "success": true,
+  "data": {
+    "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f",
+    "name": "Koin Emas UBS 20gr",
+    "sku": "BAT-ANT-10-001",
+    "category": { "id": "...", "name": "Koin" },
+    "brand": { "id": "...", "name": "UBS" },
+    "weight_gram": 20,
+    "description": "Diubah jadi koin",
+    "is_active": true,
+    "created_at": "2026-07-31T09:00:00Z",
+    "updated_at": "2026-07-31T10:15:00Z"
+  }
+}
+```
+`sku` tetap `BAT-ANT-10-001` meski kategori/brand/berat berubah total — bukti SKU immutable.
 
 #### GET /api/products — list terpaginasi & terfilter
 
@@ -377,16 +413,20 @@ Contoh response `GET /api/products?search=emas&page=1&limit=20` (200):
 bisa diambil detailnya (cuma disembunyikan dari list, bukan dihapus/disamarkan datanya). Response-nya
 objek produk yang sama seperti item di list / response `POST`.
 
-Contoh response error (berlaku utk `POST`, `GET`, dan `GET /{id}`):
+Contoh response error (berlaku utk `POST`, `PUT`, `GET`, dan `GET /{id}` — `PUT` pakai pesan yang
+sama persis dengan `POST` untuk validasi field/kategori/brand):
 ```json
-// 403 — POST oleh role selain ADMIN/SUPER_ADMIN
+// 403 — POST/PUT oleh role selain ADMIN/SUPER_ADMIN
 {"success":false,"error":{"code":"FORBIDDEN","message":"Anda tidak memiliki akses untuk aksi ini"}}
 
-// 400 — POST, field wajib kosong
+// 400 — POST/PUT, field wajib kosong
 {"success":false,"error":{"code":"BAD_REQUEST","message":"name, category_id, dan brand_id wajib diisi"}}
 
-// 400 — POST, weight_gram <= 0
+// 400 — POST/PUT, weight_gram <= 0
 {"success":false,"error":{"code":"BAD_REQUEST","message":"weight_gram harus lebih besar dari 0"}}
+
+// 404 — PUT, {id} tidak ditemukan
+{"success":false,"error":{"code":"NOT_FOUND","message":"produk tidak ditemukan"}}
 
 // 400 — POST, category_id/brand_id merujuk ke resource yang is_active=false
 {"success":false,"error":{"code":"BAD_REQUEST","message":"kategori tidak aktif"}}
@@ -494,7 +534,7 @@ Dua lapis test:
   (unique index case-insensitive di `lower(name)`)
 - Get dengan id bukan UUID → 400; UUID valid tapi tidak ada → 404
 
-**`products_test.go`** — `/api/products` (BE-201 create + BE-202 list/detail)
+**`products_test.go`** — `/api/products` (BE-201 create + BE-202 list/detail + BE-203 update)
 - `POST` (ADMIN & SUPER_ADMIN): tanpa token → 401; role KASIR → 403
 - Create dengan kategori "Batangan" + brand "Antam" + berat 10 → `sku == "BAT-ANT-10-001"`,
   `is_active == true`, `category`/`brand` nested `{id, name}` sama dengan yang dikirim/dipilih
@@ -513,6 +553,14 @@ Dua lapis test:
   → 404; format id bukan UUID → 400
 - Detail: produk yang sudah diarsipkan **tetap** bisa diambil (200, `is_active: false`) — cuma
   disembunyikan dari list, bukan dari lookup-by-id
+- `PUT` (ADMIN & SUPER_ADMIN): tanpa token → 401; role KASIR → 403
+- Update mengubah name/category/brand/weight/description, tapi **`sku` tetap sama** dengan sebelum
+  diubah — inti acceptance criteria BE-203
+- `{id}` tidak ditemukan → 404; format id bukan UUID → 400
+- Field wajib kosong → 400; `weight_gram <= 0` → 400
+- `category_id`/`brand_id` UUID valid tapi tidak ada → 404; merujuk yang `is_active=false` → 400
+- Update dengan `is_active: true` pada produk yang sudah diarsipkan (lewat SQL) → mereaktivasi
+  (200, `is_active == true`, muncul lagi di `GET /api/products`)
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta

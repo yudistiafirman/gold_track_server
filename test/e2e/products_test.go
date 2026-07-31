@@ -458,6 +458,222 @@ func TestProducts_GetInvalidIDFormat(t *testing.T) {
 	}
 }
 
+func TestProducts_UpdateRequiresAuth(t *testing.T) {
+	resetDB(t)
+
+	status, _ := doRequest(t, http.MethodPut, "/api/products/00000000-0000-0000-0000-000000000000", nil, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", status)
+	}
+}
+
+func TestProducts_UpdateNonAdminForbidden(t *testing.T) {
+	resetDB(t)
+	kasir := seedUser(t, "KASIR", true)
+	token := login(t, kasir.Email, kasir.Password)
+
+	status, resp := doRequest(t, http.MethodPut, "/api/products/00000000-0000-0000-0000-000000000000", nil, token)
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestProducts_UpdateAppliesChangesButKeepsSKU(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	category1 := createCategory(t, adminToken, "Batangan")
+	brand1 := createBrand(t, adminToken, "Antam")
+	category2 := createCategory(t, adminToken, "Koin")
+	brand2 := createBrand(t, adminToken, "UBS")
+
+	created := createProduct(t, adminToken, "Emas Batangan 10gr", category1.ID, brand1.ID, 10)
+
+	status, resp := doRequest(t, http.MethodPut, "/api/products/"+created.ID, map[string]any{
+		"name":        "Koin Emas UBS 20gr",
+		"category_id": category2.ID,
+		"brand_id":    brand2.ID,
+		"weight_gram": 20,
+		"description": "Diubah jadi koin",
+		"is_active":   true,
+	}, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("update: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	var updated productDTO
+	decodeData(t, resp, &updated)
+	if updated.SKU != created.SKU {
+		t.Fatalf("update: expected sku to stay %q, got %q", created.SKU, updated.SKU)
+	}
+	if updated.Name != "Koin Emas UBS 20gr" {
+		t.Fatalf("update: expected name applied, got %q", updated.Name)
+	}
+	if updated.Category.ID != category2.ID || updated.Brand.ID != brand2.ID {
+		t.Fatalf("update: expected category/brand applied, got %+v", updated)
+	}
+	if updated.WeightGram != 20 {
+		t.Fatalf("update: expected weight_gram=20, got %v", updated.WeightGram)
+	}
+	if updated.Description != "Diubah jadi koin" {
+		t.Fatalf("update: expected description applied, got %q", updated.Description)
+	}
+}
+
+func TestProducts_UpdateNotFound(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	category := createCategory(t, adminToken, "Batangan")
+	brand := createBrand(t, adminToken, "Antam")
+
+	status, resp := doRequest(t, http.MethodPut, "/api/products/00000000-0000-0000-0000-000000000000", map[string]any{
+		"name":        "Produk Tidak Ada",
+		"category_id": category.ID,
+		"brand_id":    brand.ID,
+		"weight_gram": 10,
+	}, adminToken)
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestProducts_UpdateInvalidIDFormat(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodPut, "/api/products/1", map[string]any{}, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-UUID id, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestProducts_UpdateMissingRequiredFields(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	category := createCategory(t, adminToken, "Batangan")
+	brand := createBrand(t, adminToken, "Antam")
+	created := createProduct(t, adminToken, "Produk Awal", category.ID, brand.ID, 10)
+
+	status, resp := doRequest(t, http.MethodPut, "/api/products/"+created.ID, map[string]any{}, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestProducts_UpdateInvalidWeight(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	category := createCategory(t, adminToken, "Batangan")
+	brand := createBrand(t, adminToken, "Antam")
+	created := createProduct(t, adminToken, "Produk Awal", category.ID, brand.ID, 10)
+
+	status, resp := doRequest(t, http.MethodPut, "/api/products/"+created.ID, map[string]any{
+		"name":        "Produk Awal",
+		"category_id": category.ID,
+		"brand_id":    brand.ID,
+		"weight_gram": 0,
+	}, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for zero weight, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestProducts_UpdateCategoryOrBrandNotFound(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	category := createCategory(t, adminToken, "Batangan")
+	brand := createBrand(t, adminToken, "Antam")
+	created := createProduct(t, adminToken, "Produk Awal", category.ID, brand.ID, 10)
+
+	status, resp := doRequest(t, http.MethodPut, "/api/products/"+created.ID, map[string]any{
+		"name":        "Produk Awal",
+		"category_id": "00000000-0000-0000-0000-000000000000",
+		"brand_id":    brand.ID,
+		"weight_gram": 10,
+	}, adminToken)
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404 for nonexistent category, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestProducts_UpdateInactiveCategoryRejected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	category := createCategory(t, adminToken, "Batangan")
+	brand := createBrand(t, adminToken, "Antam")
+	created := createProduct(t, adminToken, "Produk Awal", category.ID, brand.ID, 10)
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/categories/"+category.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("deactivate category: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodPut, "/api/products/"+created.ID, map[string]any{
+		"name":        "Produk Awal",
+		"category_id": category.ID,
+		"brand_id":    brand.ID,
+		"weight_gram": 10,
+	}, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for inactive category, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestProducts_UpdateCanReactivateArchivedProduct(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	category := createCategory(t, adminToken, "Batangan")
+	brand := createBrand(t, adminToken, "Antam")
+	created := createProduct(t, adminToken, "Produk Arsip", category.ID, brand.ID, 10)
+	deactivateProduct(t, created.ID)
+
+	status, resp := doRequest(t, http.MethodPut, "/api/products/"+created.ID, map[string]any{
+		"name":        created.Name,
+		"category_id": category.ID,
+		"brand_id":    brand.ID,
+		"weight_gram": created.WeightGram,
+		"is_active":   true,
+	}, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("reactivate: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var updated productDTO
+	decodeData(t, resp, &updated)
+	if !updated.IsActive {
+		t.Fatal("reactivate: expected is_active=true")
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/products", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("list: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var list productListDTO
+	decodeData(t, resp, &list)
+	found := false
+	for _, p := range list.Items {
+		if p.ID == created.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected reactivated product to reappear in active list")
+	}
+}
+
 func TestProducts_KasirCanListAndGet(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)

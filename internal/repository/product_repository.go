@@ -71,6 +71,10 @@ type ProductRepository interface {
 	// FindByPublicID looks up a product regardless of is_active — archiving
 	// only hides a product from List, it stays reachable by id.
 	FindByPublicID(ctx context.Context, publicID string) (*ProductWithRefs, error)
+	// Update applies name/category_id/brand_id/weight_gram/description/is_active
+	// and bumps updated_at — sku is deliberately never in the SET clause, so
+	// it cannot change regardless of what else is edited.
+	Update(ctx context.Context, p *model.Product) error
 }
 
 type productRepository struct {
@@ -198,4 +202,23 @@ func (r *productRepository) FindByPublicID(ctx context.Context, publicID string)
 		return nil, fmt.Errorf("find product by public id: %w", err)
 	}
 	return &p, nil
+}
+
+func (r *productRepository) Update(ctx context.Context, p *model.Product) error {
+	const query = `
+		UPDATE products
+		SET name = $1, category_id = $2, brand_id = $3, weight_gram = $4,
+			description = $5, is_active = $6, updated_at = now()
+		WHERE id = $7
+		RETURNING updated_at
+	`
+	err := r.db.QueryRow(ctx, query, p.Name, p.CategoryID, p.BrandID, p.WeightGram, p.Description, p.IsActive, p.ID).
+		Scan(&p.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrProductNotFound
+		}
+		return fmt.Errorf("update product: %w", err)
+	}
+	return nil
 }

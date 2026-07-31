@@ -75,6 +75,7 @@ func NewRouter(
 					r.Delete("/{id}", brandHandler.Delete)
 				})
 				r.Post("/products", productHandler.Create)
+				r.Put("/products/{id}", productHandler.Update)
 			})
 		})
 	})
