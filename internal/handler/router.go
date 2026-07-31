@@ -12,7 +12,7 @@ import (
 
 // NewRouter wires global middleware (request id, centralized recovery +
 // error response, request logging) and all route registrations.
-func NewRouter(logger *slog.Logger, healthHandler *HealthHandler) http.Handler {
+func NewRouter(logger *slog.Logger, healthHandler *HealthHandler, authHandler *AuthHandler) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
@@ -21,6 +21,10 @@ func NewRouter(logger *slog.Logger, healthHandler *HealthHandler) http.Handler {
 	r.Use(appmw.RequestLogger(logger))
 
 	r.Get("/health", healthHandler.Check)
+
+	r.Route("/api", func(r chi.Router) {
+		r.Post("/auth/login", authHandler.Login)
+	})
 
 	return r
 }

@@ -47,6 +47,10 @@ func Unavailable(message string, err error) *AppError {
 	return New(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", message, err)
 }
 
+func Unauthorized(message string, err error) *AppError {
+	return New(http.StatusUnauthorized, "UNAUTHORIZED", message, err)
+}
+
 // As extracts an *AppError from err, wrapping it as an internal error if it isn't one.
 func As(err error) *AppError {
 	var appErr *AppError

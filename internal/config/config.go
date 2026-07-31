@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -9,10 +10,14 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// devJWTSecret is only used when JWT_SECRET is unset in the local environment.
+const devJWTSecret = "dev-secret-change-me"
+
 // Config holds all configuration for the application, sourced from environment variables.
 type Config struct {
 	App      AppConfig
 	Database DatabaseConfig
+	JWT      JWTConfig
 }
 
 type AppConfig struct {
@@ -33,6 +38,11 @@ type DatabaseConfig struct {
 	MaxConnIdleTime time.Duration
 }
 
+type JWTConfig struct {
+	Secret string
+	Expiry time.Duration
+}
+
 // DSN builds a PostgreSQL connection string from the database config.
 func (d DatabaseConfig) DSN() string {
 	return fmt.Sprintf(
@@ -46,9 +56,20 @@ func (d DatabaseConfig) DSN() string {
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
+	appEnv := getEnv("APP_ENV", "local")
+
+	jwtSecret := getEnv("JWT_SECRET", "")
+	if jwtSecret == "" {
+		if appEnv != "local" {
+			return nil, fmt.Errorf("JWT_SECRET is required outside the local environment")
+		}
+		jwtSecret = devJWTSecret
+		log.Println("WARNING: JWT_SECRET not set, using insecure development default")
+	}
+
 	cfg := &Config{
 		App: AppConfig{
-			Env:  getEnv("APP_ENV", "local"),
+			Env:  appEnv,
 			Port: getEnv("APP_PORT", "8080"),
 		},
 		Database: DatabaseConfig{
@@ -62,6 +83,10 @@ func Load() (*Config, error) {
 			MinConns:        int32(getEnvInt("DB_MIN_CONNS", 2)),
 			MaxConnLifetime: getEnvDuration("DB_MAX_CONN_LIFETIME", time.Hour),
 			MaxConnIdleTime: getEnvDuration("DB_MAX_CONN_IDLE_TIME", 30*time.Minute),
+		},
+		JWT: JWTConfig{
+			Secret: jwtSecret,
+			Expiry: getEnvDuration("JWT_EXPIRY", 24*time.Hour),
 		},
 	}
 

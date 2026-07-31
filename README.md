@@ -68,6 +68,30 @@ Membuat (kalau belum ada — aman dijalankan berkali-kali, tidak duplikat):
 
 Data toko yang sudah pernah diubah lewat aplikasi tidak akan ditimpa ulang oleh seeder (`ON CONFLICT DO NOTHING`); password admin yang sudah ada juga tidak direset di run berikutnya.
 
+## API
+
+### POST /api/auth/login
+
+```bash
+curl -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@goldtrack.local","password":"ChangeMe123!"}'
+```
+
+Sukses (200):
+```json
+{"success":true,"data":{"token":"<jwt>","user":{"id":1,"name":"Super Admin","role":"SUPER_ADMIN"}}}
+```
+
+Gagal (401, berlaku sama untuk email tidak ada, password salah, maupun akun nonaktif —
+sengaja disamakan supaya tidak membocorkan status akun):
+```json
+{"success":false,"error":{"code":"UNAUTHORIZED","message":"Email atau password salah"}}
+```
+
+Token JWT (HS256) berisi `user_id`, `role`, `exp` (masa berlaku dari `JWT_EXPIRY`, default 24h),
+ditandatangani dengan `JWT_SECRET`. `last_login_at` di-update setiap login sukses.
+
 ## Konfigurasi (env)
 
 Lihat `.env.example` untuk daftar lengkap. Semua diambil dari environment

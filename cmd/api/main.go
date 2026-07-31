@@ -40,7 +40,11 @@ func main() {
 	healthService := service.NewHealthService(healthRepo)
 	healthHandler := handler.NewHealthHandler(healthService)
 
-	router := handler.NewRouter(log, healthHandler)
+	userRepo := repository.NewUserRepository(dbPool)
+	authService := service.NewAuthService(userRepo, cfg.JWT.Secret, cfg.JWT.Expiry)
+	authHandler := handler.NewAuthHandler(authService)
+
+	router := handler.NewRouter(log, healthHandler, authHandler)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.App.Port,
