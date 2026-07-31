@@ -55,6 +55,19 @@ Urutan file (`000001`…`000015`) mengikuti dependency FK: `users` → `supplier
 Menambah migrasi baru: buat pasangan file
 `migrations/{next_number}_{deskripsi}.up.sql` dan `.down.sql`.
 
+## Seeder data awal
+
+```bash
+go run ./cmd/seed
+```
+
+Membuat (kalau belum ada — aman dijalankan berkali-kali, tidak duplikat):
+- 1 user `SUPER_ADMIN` (email/password dari `SEED_ADMIN_*`, default `admin@goldtrack.local` / `ChangeMe123!` — **ganti setelah login pertama**), password disimpan sebagai bcrypt hash.
+- 7 `expense_categories` default: Listrik, Wifi/Internet, ATK, Gaji Karyawan, Sewa Tempat, Transportasi, Lain-lain.
+- 3 `settings` data toko (`shop_name`, `shop_address`, `shop_phone`) dari `SEED_SHOP_*`.
+
+Data toko yang sudah pernah diubah lewat aplikasi tidak akan ditimpa ulang oleh seeder (`ON CONFLICT DO NOTHING`); password admin yang sudah ada juga tidak direset di run berikutnya.
+
 ## Konfigurasi (env)
 
 Lihat `.env.example` untuk daftar lengkap. Semua diambil dari environment
