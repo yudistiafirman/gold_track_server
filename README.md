@@ -1284,6 +1284,96 @@ Contoh response error:
 {"success":false,"error":{"code":"BAD_REQUEST","message":"expense_date wajib diisi"}}
 ```
 
+### /api/reports — laporan (BE-1301/BE-1302/BE-1303, ADMIN & SUPER_ADMIN)
+
+```bash
+GET /api/reports/transactions   # ?from=&to=&type=       -> 200
+GET /api/reports/stock          # ?threshold=             -> 200
+GET /api/reports/finance        # ?from=&to=               -> 200
+```
+
+Tiga endpoint read-only, tanpa pagination (hasil agregat yang jumlahnya sudah kebatasi — beberapa
+baris per tipe, satu baris per produk aktif, tiga angka — bukan listing per baris).
+
+**`GET /api/reports/transactions`** — rekap `transaction_count`/`total_amount`/`total_weight`
+per tipe (`SELL`, `BUY`, `SELL_SUPPLIER`). `?from=&to=` masing-masing independen opsional
+(format `YYYY-MM-DD`, inklusif di kedua ujung, filter di `created_at::date` karena `transactions`
+tidak punya kolom `DATE` polos); `?type=` opsional, kalau diisi harus salah satu dari ketiga tipe
+(400 kalau bukan) dan `breakdown[]` cuma berisi tipe itu. `breakdown[]` cuma memuat tipe yang
+punya minimal 1 transaksi di rentang yang difilter (tidak ada baris nol buat tipe yang kosong).
+`total` adalah jumlah seluruh `breakdown[]` (dihitung di Go, bukan query kedua).
+
+**`GET /api/reports/stock`** — satu baris per **produk aktif** (`is_active=true`), `LEFT JOIN` ke
+`stock_items` supaya produk yang stoknya benar-benar habis (0 unit `AVAILABLE`) **tetap muncul**
+dengan `available_count: 0` dan `low_stock: true` — justru itu kasus paling mendesak buat
+peringatan stok menipis. Produk yang diarsipkan tidak muncul sama sekali (tidak akan di-restock,
+jadi peringatan buat produk itu tidak actionable). `good_count`/`bad_count` cuma menghitung unit
+`AVAILABLE` (unit `SOLD` tidak dihitung sama sekali, di kondisi manapun). `?threshold=` opsional,
+default `5` kalau tidak diisi atau ≤0 — `low_stock = available_count <= threshold`, dihitung ulang
+tiap request, tidak disimpan di mana pun (tidak ada setting baru buat ini).
+
+**`GET /api/reports/finance`** — bukan cuma satu angka net, tapi breakdown lengkap biar auditable:
+
+- `sales_breakdown[]` — satu baris per tipe yang dianggap penjualan (**`SELL`** dan
+  **`SELL_SUPPLIER`**, keduanya sama-sama punya `cogs` yang ke-set saat checkout), masing-masing
+  dengan `transaction_count`, `total_revenue` (Σ `price_total`), `total_cogs` (Σ `cogs`), dan
+  `gross_profit` (`total_revenue - total_cogs`) per tipe itu sendiri. **`BUY`** tidak pernah
+  muncul di sini — `cogs`-nya memang selalu `NULL` (unit baru masuk stok, belum ada yang dijual).
+- `expense_breakdown[]` — satu baris per `expense_categories` yang punya minimal satu `expenses`
+  di rentang yang difilter, dengan `total_amount` per kategori.
+- `total_revenue`, `total_cogs`, `gross_profit` — jumlah seluruh `sales_breakdown[]` (dihitung di
+  Go, bukan query kedua, sama pola dengan `total` di laporan transaksi).
+- `gross_margin_percent = gross_profit / total_revenue * 100` — `0` (bukan `NaN`/`Inf`, yang bakal
+  bikin JSON marshal gagal total) kalau `total_revenue` masih nol (belum ada penjualan sama sekali
+  di periode itu).
+- `total_expenses` — jumlah seluruh `expense_breakdown[]`. `net_profit = gross_profit -
+  total_expenses`.
+
+`?from=&to=` sama seperti laporan transaksi — masing-masing independen opsional, filter transaksi
+di `created_at::date`, filter expense langsung di `expense_date` (kolom `DATE` asli).
+
+Contoh response `GET /api/reports/transactions` (200):
+```json
+{
+  "success": true,
+  "data": {
+    "from": "2026-07-01",
+    "to": "2026-07-31",
+    "breakdown": [
+      { "type": "BUY", "transaction_count": 5, "total_amount": 4500000, "total_weight": 45 },
+      { "type": "SELL", "transaction_count": 12, "total_amount": 15000000, "total_weight": 120.5 },
+      { "type": "SELL_SUPPLIER", "transaction_count": 2, "total_amount": 900000, "total_weight": 9 }
+    ],
+    "total": { "transaction_count": 19, "total_amount": 20400000, "total_weight": 174.5 }
+  }
+}
+```
+
+Contoh response `GET /api/reports/finance` (200):
+```json
+{
+  "success": true,
+  "data": {
+    "from": "2026-07-01",
+    "to": "2026-07-31",
+    "sales_breakdown": [
+      { "type": "SELL", "transaction_count": 12, "total_revenue": 15000000, "total_cogs": 10500000, "gross_profit": 4500000 },
+      { "type": "SELL_SUPPLIER", "transaction_count": 2, "total_revenue": 900000, "total_cogs": 700000, "gross_profit": 200000 }
+    ],
+    "expense_breakdown": [
+      { "category": { "id": "...", "name": "Listrik" }, "total_amount": 500000 },
+      { "category": { "id": "...", "name": "Gaji Karyawan" }, "total_amount": 700000 }
+    ],
+    "total_revenue": 15900000,
+    "total_cogs": 11200000,
+    "gross_profit": 4700000,
+    "gross_margin_percent": 29.56,
+    "total_expenses": 1200000,
+    "net_profit": 3500000
+  }
+}
+```
+
 ## Middleware JWT & role (internal/middleware/auth.go)
 
 - `appmw.JWTAuth(authService)` — verifikasi Bearer token (signature, expiry, dan status
@@ -1591,6 +1681,30 @@ Dua lapis test:
   memfilter rentang tanggal dengan benar (termasuk batas inklusif di kedua ujung, dan rentang
   open-ended kalau cuma salah satu diisi); `?page=&limit=` paginasi; `?category_id=` yang tidak
   ditemukan → 404
+
+**`reports_test.go`** — `/api/reports` (BE-1301/BE-1302/BE-1303)
+- Semua endpoint tanpa token → 401; role KASIR → 403
+- **Transactions**: satu transaksi `SELL`, `BUY`, dan `SELL_SUPPLIER` → `breakdown[]` berisi
+  ketiganya dengan `transaction_count`/`total_amount`/`total_weight` yang benar, `total` adalah
+  jumlah ketiganya; `?type=SELL` → `breakdown[]` cuma berisi satu baris itu; `?type=INVALID` →
+  400; `?from=&to=` cuma menghitung transaksi di rentang itu (transaksi lain di-backdate langsung
+  lewat SQL, tidak ada endpoint buat itu); format tanggal salah → 400
+- **Stock**: produk dengan 2 unit GOOD + 1 unit BAD (semua `AVAILABLE`) + 1 unit `SOLD` →
+  `available_count=3, good_count=2, bad_count=1` (unit `SOLD` tidak dihitung sama sekali); produk
+  aktif tanpa stok sama sekali tetap muncul dengan semua hitungan nol dan `low_stock=true`; produk
+  yang diarsipkan tidak muncul di laporan sama sekali; `?threshold=` mengganti default (`5`) dan
+  mengubah `low_stock` sesuai
+- **Finance**: transaksi `SELL` dan `SELL_SUPPLIER` dengan `price_total`/`purchase_price` (cogs)
+  yang diketahui → `sales_breakdown[]` punya baris terpisah buat tiap tipe dengan
+  `total_revenue`/`total_cogs`/`gross_profit` yang benar, `total_revenue`/`total_cogs`/
+  `gross_profit` tingkat atas adalah jumlah keduanya, `gross_margin_percent` sesuai rumus; transaksi
+  `BUY` di periode yang sama **tidak** muncul di `sales_breakdown[]` sama sekali dan tidak
+  memengaruhi angka apa pun (`cogs`-nya selalu `NULL`); dua `expense` di kategori yang sama →
+  `expense_breakdown[]` menjumlahkannya jadi satu baris, kategori berbeda → baris terpisah;
+  `total_expenses` cocok, `net_profit == gross_profit - total_expenses`; `gross_margin_percent`
+  tetap `0` (bukan `NaN`/`Inf`, yang bikin JSON decode gagal) kalau belum ada penjualan sama
+  sekali di periode itu; `?from=&to=` memfilter baik transaksi maupun expense dengan benar;
+  format tanggal salah → 400
 
 Konvensi menambah endpoint baru: tambah skenario di file `test/e2e/{resource}_test.go` baru
 (ikuti pola `health_test.go` / `auth_test.go` / `users_test.go`) supaya suite ini tetap jadi peta
