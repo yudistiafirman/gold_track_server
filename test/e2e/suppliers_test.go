@@ -261,3 +261,180 @@ func TestSuppliers_DeleteIsSoftDelete(t *testing.T) {
 		t.Fatal("expected archived supplier to remain visible in list")
 	}
 }
+
+// --- GET /api/suppliers/{id}/transactions: combined PO + SELL_SUPPLIER history ---
+
+type supplierHistoryEntryDTO struct {
+	ID          string  `json:"id"`
+	Source      string  `json:"source"`
+	Code        string  `json:"code"`
+	Status      string  `json:"status"`
+	TotalAmount float64 `json:"total_amount"`
+}
+
+type supplierHistoryListDTO struct {
+	Items      []supplierHistoryEntryDTO `json:"items"`
+	Pagination paginationDTO             `json:"pagination"`
+}
+
+func TestSuppliers_HistoryRequiresAuth(t *testing.T) {
+	resetDB(t)
+
+	status, _ := doRequest(t, http.MethodGet, "/api/suppliers/"+nonexistentUUID+"/transactions", nil, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", status)
+	}
+}
+
+func TestSuppliers_HistoryNonAdminForbidden(t *testing.T) {
+	resetDB(t)
+	kasir := seedUser(t, "KASIR", true)
+	token := login(t, kasir.Email, kasir.Password)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/suppliers/"+nonexistentUUID+"/transactions", nil, token)
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestSuppliers_HistoryCombinesPOAndSellSupplier(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	supplier := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
+
+	po := createPurchaseOrder(t, adminToken, supplier.ID, []map[string]any{
+		{"product_id": product.ID, "quantity": 2, "purchase_price": 800000},
+	})
+
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", map[string]any{
+		"type":           "SELL_SUPPLIER",
+		"supplier_id":    supplier.ID,
+		"payment_method": "CASH",
+		"items":          []map[string]any{{"stock_item_id": stockItem.ID, "price_total": 100000}},
+	}, adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("sell_supplier: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var sellSupplierTx transactionDTO
+	decodeData(t, resp, &sellSupplierTx)
+
+	status, resp = doRequest(t, http.MethodGet, "/api/suppliers/"+supplier.ID+"/transactions", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var history supplierHistoryListDTO
+	decodeData(t, resp, &history)
+
+	if history.Pagination.Total != 2 || len(history.Items) != 2 {
+		t.Fatalf("expected 2 combined history items, got %+v", history)
+	}
+	// Newest first — the SELL_SUPPLIER transaction was created after the PO.
+	if history.Items[0].ID != sellSupplierTx.ID || history.Items[0].Source != "SELL_SUPPLIER" || history.Items[0].Code != sellSupplierTx.TransactionCode {
+		t.Fatalf("expected newest item to be the SELL_SUPPLIER transaction, got %+v", history.Items[0])
+	}
+	if history.Items[1].ID != po.ID || history.Items[1].Source != "PURCHASE_ORDER" || history.Items[1].Code != po.POCode {
+		t.Fatalf("expected oldest item to be the PO, got %+v", history.Items[1])
+	}
+	if history.Items[1].Status != "BELUM_DITERIMA" || history.Items[1].TotalAmount != 1600000 {
+		t.Fatalf("expected PO status/total_amount to match, got %+v", history.Items[1])
+	}
+}
+
+func TestSuppliers_HistoryExcludesOtherSuppliers(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	supplierA := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
+	supplierB := createSupplier(t, adminToken, map[string]any{"name": "Toko Perak Sentosa"})
+
+	createPurchaseOrder(t, adminToken, supplierB.ID, []map[string]any{
+		{"product_id": product.ID, "quantity": 1, "purchase_price": 800000},
+	})
+
+	status, resp := doRequest(t, http.MethodGet, "/api/suppliers/"+supplierA.ID+"/transactions", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var history supplierHistoryListDTO
+	decodeData(t, resp, &history)
+	if history.Pagination.Total != 0 || len(history.Items) != 0 {
+		t.Fatalf("expected empty history for supplier A, got %+v", history)
+	}
+}
+
+func TestSuppliers_HistoryPagination(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	supplier := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
+
+	for i := 0; i < 3; i++ {
+		createPurchaseOrder(t, adminToken, supplier.ID, []map[string]any{
+			{"product_id": product.ID, "quantity": 1, "purchase_price": 800000},
+		})
+	}
+
+	status, resp := doRequest(t, http.MethodGet, "/api/suppliers/"+supplier.ID+"/transactions?limit=2&page=1", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("page 1: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var page1 supplierHistoryListDTO
+	decodeData(t, resp, &page1)
+	if len(page1.Items) != 2 || page1.Pagination.Total != 3 || page1.Pagination.TotalPages != 2 {
+		t.Fatalf("page 1: expected 2 items total=3 total_pages=2, got %d items %+v", len(page1.Items), page1.Pagination)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/suppliers/"+supplier.ID+"/transactions?limit=2&page=2", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("page 2: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var page2 supplierHistoryListDTO
+	decodeData(t, resp, &page2)
+	if len(page2.Items) != 1 {
+		t.Fatalf("page 2: expected 1 item, got %d", len(page2.Items))
+	}
+}
+
+func TestSuppliers_HistoryEmptyIsNotError(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	supplier := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
+
+	status, resp := doRequest(t, http.MethodGet, "/api/suppliers/"+supplier.ID+"/transactions", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var history supplierHistoryListDTO
+	decodeData(t, resp, &history)
+	if history.Pagination.Total != 0 || len(history.Items) != 0 {
+		t.Fatalf("expected empty history, not an error, got %+v", history)
+	}
+}
+
+func TestSuppliers_HistoryNotFound(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/suppliers/"+nonexistentUUID+"/transactions", nil, adminToken)
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestSuppliers_HistoryInvalidIDFormat(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/suppliers/1/transactions", nil, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
+	}
+}

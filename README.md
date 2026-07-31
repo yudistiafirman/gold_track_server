@@ -473,11 +473,12 @@ sama persis dengan `POST` untuk validasi field/kategori/brand):
 ### /api/suppliers — CRUD supplier (ADMIN & SUPER_ADMIN)
 
 ```bash
-GET    /api/suppliers        # ?search=&page=&limit= -> 200
-POST   /api/suppliers        # { name, phone?, address?, notes? }          -> 201
-GET    /api/suppliers/{id}   # detail supplier                              -> 200 / 404
-PUT    /api/suppliers/{id}   # { name, phone?, address?, notes?, is_active } -> 200 / 404
-DELETE /api/suppliers/{id}   # soft delete (is_active=false)                -> 200 / 404
+GET    /api/suppliers                  # ?search=&page=&limit=                        -> 200
+POST   /api/suppliers                  # { name, phone?, address?, notes? }            -> 201
+GET    /api/suppliers/{id}             # detail supplier                                -> 200 / 404
+PUT    /api/suppliers/{id}             # { name, phone?, address?, notes?, is_active }  -> 200 / 404
+DELETE /api/suppliers/{id}             # soft delete (is_active=false)                  -> 200 / 404
+GET    /api/suppliers/{id}/transactions # ?page=&limit= — riwayat gabungan (lihat bawah) -> 200 / 404
 ```
 
 `{id}` adalah `public_id` (UUID). Cuma `name` yang wajib — `phone`/`address`/`notes` opsional,
@@ -514,6 +515,40 @@ Contoh response `GET /api/suppliers?search=emas&page=1&limit=20` (200):
   "data": {
     "items": [ { "...": "objek supplier yang sama seperti di atas" } ],
     "pagination": { "page": 1, "limit": 20, "total": 1, "total_pages": 1 }
+  }
+}
+```
+
+#### GET /api/suppliers/{id}/transactions — riwayat gabungan supplier
+
+Beda dengan `GET /api/customers/{id}/transactions` (BE-602) yang cuma baca satu tabel
+(`transactions`), hubungan toko-supplier tersebar di **dua tabel yang tidak berelasi**: `
+purchase_orders` (toko **beli** stok dari supplier — relasi utama, paling sering kejadian) dan
+`transactions` bertipe `SELL_SUPPLIER` (toko **jual balik** unit ke supplier — retur/likuidasi,
+lebih jarang). Endpoint ini menggabungkan keduanya jadi satu list terpaginasi, urut `created_at`
+terbaru duluan, lewat satu query `UNION ALL` (jadi `ORDER BY`/`LIMIT`/`OFFSET`-nya satu
+merge-sort di Postgres, bukan digabung manual di Go). Tiap baris punya field `source`
+(`PURCHASE_ORDER` atau `SELL_SUPPLIER`) buat bedain asalnya; `code` adalah `po_code` atau
+`transaction_code` tergantung sumbernya. `{id}` tidak ditemukan → 404; format bukan UUID → 400;
+supplier tanpa riwayat sama sekali → `items: []`, bukan error.
+
+**Detail per baris**: list ini header-only (sama pola dengan `transactionSummaryResponse` di
+riwayat customer), sengaja tidak membawa `items[]`. Buat detail lengkap satu entri, pakai `id`
+baris itu (bukan `id` supplier) ke endpoint detail yang sudah ada, dipilih berdasarkan `source`:
+`source=PURCHASE_ORDER` → `GET /api/purchase-orders/{id}`, `source=SELL_SUPPLIER` → `GET
+/api/transactions/{id}`. Tidak ada endpoint detail terpadu baru — kedua endpoint itu sudah
+lengkap (items, status, dll), jadi tidak perlu duplikasi logic.
+
+Contoh response (200):
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      { "id": "...", "source": "SELL_SUPPLIER", "code": "TRX-20260731-0002", "status": "COMPLETED", "total_amount": 100000, "created_at": "2026-07-31T10:00:00Z" },
+      { "id": "...", "source": "PURCHASE_ORDER", "code": "PO-20260731-0001", "status": "BELUM_DITERIMA", "total_amount": 1600000, "created_at": "2026-07-31T09:00:00Z" }
+    ],
+    "pagination": { "page": 1, "limit": 20, "total": 2, "total_pages": 1 }
   }
 }
 ```
@@ -1516,6 +1551,12 @@ Dua lapis test:
   (`pagination.total`/`total_pages` sesuai)
 - List: supplier yang sudah diarsipkan **tetap** muncul di list (beda dari `/api/products`)
 - Get dengan id bukan UUID → 400; UUID valid tapi tidak ada → 404
+- `GET /{id}/transactions` (riwayat gabungan): tanpa token → 401; role KASIR → 403; supplier
+  dengan 1 PO + 1 transaksi `SELL_SUPPLIER` → `items[]` berisi keduanya urut terbaru duluan,
+  `source`/`code`/`status`/`total_amount` masing-masing sesuai asalnya (`po_code`/`status` PO vs
+  `transaction_code`/`status` transaksi); riwayat milik supplier lain tidak ikut ke-list;
+  `?page=&limit=` paginasi lintas kedua sumber dengan benar; supplier tanpa riwayat →
+  `items: []` (bukan error); supplier tidak ditemukan → 404; format id bukan UUID → 400
 
 **`stock_items_test.go`** — `/api/products/{productId}/stock-items` & `/api/stock-items`
 (BE-501 create, BE-502 list/detail, BE-503 update, BE-504 hard delete, BE-505 label)

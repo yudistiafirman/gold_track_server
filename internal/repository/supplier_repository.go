@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,12 +26,34 @@ type SupplierFilter struct {
 	Limit  int
 }
 
+// SupplierHistoryEntry is one row of a supplier's combined history — a
+// purchase order (the shop buying from them) or a SELL_SUPPLIER
+// transaction (the shop selling back to them). Source tells them apart;
+// Code/Status/TotalAmount/CreatedAt are the fields both sides have in
+// common (po_code vs transaction_code just become "Code").
+type SupplierHistoryEntry struct {
+	PublicID    string
+	Source      string // PURCHASE_ORDER | SELL_SUPPLIER
+	Code        string
+	Status      string
+	TotalAmount float64
+	CreatedAt   time.Time
+}
+
+type SupplierHistoryFilter struct {
+	Page, Limit int
+}
+
 type SupplierRepository interface {
 	Create(ctx context.Context, s *model.Supplier) (*model.Supplier, error)
 	FindByPublicID(ctx context.Context, publicID string) (*model.Supplier, error)
 	List(ctx context.Context, filter SupplierFilter) ([]model.Supplier, int, error)
 	Update(ctx context.Context, s *model.Supplier) error
 	SetActive(ctx context.Context, publicID string, isActive bool) error
+	// ListHistory returns a supplier's combined purchase-order +
+	// SELL_SUPPLIER-transaction history, newest first, via a single UNION
+	// ALL query — one Postgres merge-sort, not two round trips merged in Go.
+	ListHistory(ctx context.Context, supplierID int64, filter SupplierHistoryFilter) ([]SupplierHistoryEntry, int, error)
 }
 
 type supplierRepository struct {
@@ -147,4 +170,52 @@ func (r *supplierRepository) SetActive(ctx context.Context, publicID string, isA
 		return ErrSupplierNotFound
 	}
 	return nil
+}
+
+func (r *supplierRepository) ListHistory(ctx context.Context, supplierID int64, filter SupplierHistoryFilter) ([]SupplierHistoryEntry, int, error) {
+	const countQuery = `
+		SELECT
+			(SELECT COUNT(*) FROM purchase_orders WHERE supplier_id = $1) +
+			(SELECT COUNT(*) FROM transactions WHERE supplier_id = $1 AND type = 'SELL_SUPPLIER')
+	`
+	var total int
+	if err := r.db.QueryRow(ctx, countQuery, supplierID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count supplier history: %w", err)
+	}
+
+	const listQuery = `
+		(
+			SELECT 'PURCHASE_ORDER' AS source, po.public_id::text AS id, po.po_code AS code,
+			       po.status AS status, po.total_amount::float8 AS total_amount, po.created_at AS created_at
+			FROM purchase_orders po
+			WHERE po.supplier_id = $1
+		)
+		UNION ALL
+		(
+			SELECT 'SELL_SUPPLIER' AS source, t.public_id::text AS id, t.transaction_code AS code,
+			       t.status AS status, t.total_amount::float8 AS total_amount, t.created_at AS created_at
+			FROM transactions t
+			WHERE t.supplier_id = $1 AND t.type = 'SELL_SUPPLIER'
+		)
+		ORDER BY created_at DESC
+		LIMIT $2 OFFSET $3
+	`
+	rows, err := r.db.Query(ctx, listQuery, supplierID, filter.Limit, (filter.Page-1)*filter.Limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list supplier history: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []SupplierHistoryEntry
+	for rows.Next() {
+		var e SupplierHistoryEntry
+		if err := rows.Scan(&e.Source, &e.PublicID, &e.Code, &e.Status, &e.TotalAmount, &e.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("scan supplier history row: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("list supplier history: %w", err)
+	}
+	return entries, total, nil
 }

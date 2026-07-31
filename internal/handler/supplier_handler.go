@@ -178,3 +178,74 @@ func (h *SupplierHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	response.JSON(w, http.StatusOK, map[string]string{"message": "supplier dinonaktifkan"})
 }
+
+// supplierHistoryEntryResponse is one row of a supplier's combined
+// purchase-order + SELL_SUPPLIER-transaction history — Source tells the
+// two kinds of record apart (Code is po_code or transaction_code).
+type supplierHistoryEntryResponse struct {
+	ID          string    `json:"id"`
+	Source      string    `json:"source"`
+	Code        string    `json:"code"`
+	Status      string    `json:"status"`
+	TotalAmount float64   `json:"total_amount"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+func toSupplierHistoryEntryResponse(e service.SupplierHistoryEntrySummary) supplierHistoryEntryResponse {
+	return supplierHistoryEntryResponse{
+		ID:          e.PublicID,
+		Source:      e.Source,
+		Code:        e.Code,
+		Status:      e.Status,
+		TotalAmount: e.TotalAmount,
+		CreatedAt:   e.CreatedAt,
+	}
+}
+
+type supplierHistoryListResponse struct {
+	Items      []supplierHistoryEntryResponse `json:"items"`
+	Pagination paginationResponse             `json:"pagination"`
+}
+
+// ListHistory returns a supplier's combined history — purchase orders (the
+// shop buying from them) and SELL_SUPPLIER transactions (the shop selling
+// back to them) — newest first, mirroring
+// TransactionHandler.ListByCustomer's shape. Lives here rather than split
+// across PurchaseOrderHandler/TransactionHandler since no single existing
+// domain handler owns both underlying tables.
+func (h *SupplierHandler) ListHistory(w http.ResponseWriter, r *http.Request) {
+	id, err := publicIDParam(r)
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+
+	result, err := h.supplierService.ListHistory(r.Context(), service.ListSupplierHistoryInput{
+		SupplierPublicID: id,
+		Page:             page,
+		Limit:            limit,
+	})
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	items := make([]supplierHistoryEntryResponse, 0, len(result.Items))
+	for _, e := range result.Items {
+		items = append(items, toSupplierHistoryEntryResponse(e))
+	}
+
+	response.JSON(w, http.StatusOK, supplierHistoryListResponse{
+		Items: items,
+		Pagination: paginationResponse{
+			Page:       result.Page,
+			Limit:      result.Limit,
+			Total:      result.Total,
+			TotalPages: result.TotalPages,
+		},
+	})
+}

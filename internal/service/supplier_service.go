@@ -62,12 +62,38 @@ type SupplierListResult struct {
 	TotalPages int
 }
 
+// SupplierHistoryEntrySummary is one row of a supplier's combined
+// purchase-order + SELL_SUPPLIER-transaction history.
+type SupplierHistoryEntrySummary struct {
+	PublicID    string
+	Source      string
+	Code        string
+	Status      string
+	TotalAmount float64
+	CreatedAt   time.Time
+}
+
+type ListSupplierHistoryInput struct {
+	SupplierPublicID string
+	Page             int
+	Limit            int
+}
+
+type SupplierHistoryListResult struct {
+	Items      []SupplierHistoryEntrySummary
+	Page       int
+	Limit      int
+	Total      int
+	TotalPages int
+}
+
 type SupplierService interface {
 	Create(ctx context.Context, input CreateSupplierInput) (SupplierSummary, error)
 	List(ctx context.Context, input ListSuppliersInput) (SupplierListResult, error)
 	Get(ctx context.Context, publicID string) (SupplierSummary, error)
 	Update(ctx context.Context, input UpdateSupplierInput) (SupplierSummary, error)
 	Deactivate(ctx context.Context, publicID string) error
+	ListHistory(ctx context.Context, input ListSupplierHistoryInput) (SupplierHistoryListResult, error)
 }
 
 type supplierService struct {
@@ -185,6 +211,56 @@ func (s *supplierService) Deactivate(ctx context.Context, publicID string) error
 		return apperror.Internal("failed to deactivate supplier", err)
 	}
 	return nil
+}
+
+func (s *supplierService) ListHistory(ctx context.Context, input ListSupplierHistoryInput) (SupplierHistoryListResult, error) {
+	supplier, err := s.supplierRepo.FindByPublicID(ctx, input.SupplierPublicID)
+	if err != nil {
+		if errors.Is(err, repository.ErrSupplierNotFound) {
+			return SupplierHistoryListResult{}, apperror.NotFound("supplier tidak ditemukan", nil)
+		}
+		return SupplierHistoryListResult{}, apperror.Internal("failed to fetch supplier", err)
+	}
+
+	page := input.Page
+	if page <= 0 {
+		page = defaultSupplierPage
+	}
+	limit := input.Limit
+	if limit <= 0 {
+		limit = defaultSupplierLimit
+	}
+	if limit > maxSupplierLimit {
+		limit = maxSupplierLimit
+	}
+
+	entries, total, err := s.supplierRepo.ListHistory(ctx, supplier.ID, repository.SupplierHistoryFilter{
+		Page:  page,
+		Limit: limit,
+	})
+	if err != nil {
+		return SupplierHistoryListResult{}, apperror.Internal("failed to list supplier history", err)
+	}
+
+	items := make([]SupplierHistoryEntrySummary, 0, len(entries))
+	for _, e := range entries {
+		items = append(items, SupplierHistoryEntrySummary{
+			PublicID:    e.PublicID,
+			Source:      e.Source,
+			Code:        e.Code,
+			Status:      e.Status,
+			TotalAmount: e.TotalAmount,
+			CreatedAt:   e.CreatedAt,
+		})
+	}
+
+	return SupplierHistoryListResult{
+		Items:      items,
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: int(math.Ceil(float64(total) / float64(limit))),
+	}, nil
 }
 
 func validateSupplierName(name string) error {

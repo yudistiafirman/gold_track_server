@@ -108,6 +108,7 @@ func NewRouter(
 					r.Get("/{id}", supplierHandler.Get)
 					r.Put("/{id}", supplierHandler.Update)
 					r.Delete("/{id}", supplierHandler.Delete)
+					r.Get("/{id}/transactions", supplierHandler.ListHistory)
 				})
 				r.Put("/customers/{id}", customerHandler.Update)
 				r.Delete("/customers/{id}", customerHandler.Delete)
