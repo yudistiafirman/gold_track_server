@@ -88,6 +88,9 @@ func TestReceipts_SellTransactionIncludesCustomerAndStore(t *testing.T) {
 	if receipt.TransactionCode != tx.TransactionCode || len(receipt.Items) != 1 {
 		t.Fatalf("expected receipt to match created transaction, got %+v", receipt)
 	}
+	if receipt.Items[0].SerialNumber != stockItem.SerialNumber {
+		t.Fatalf("expected receipt item serial_number to match stock item, got %+v", receipt.Items[0])
+	}
 	if receipt.Customer == nil || receipt.Customer.Name != "Budi Santoso" || receipt.Customer.Phone != "0811111111" || receipt.Customer.Address != "Jl. Mawar No. 2" {
 		t.Fatalf("expected customer populated from fixture, got %+v", receipt.Customer)
 	}

@@ -58,7 +58,7 @@ const transactionReceiptColumns = `
 const transactionItemColumns = `
 	ti.id, ti.public_id::text, ti.transaction_id, ti.stock_item_id, ti.product_name,
 	ti.weight_gram::float8, ti.price_per_gram::float8, ti.price_total::float8, ti.cogs::float8, ti.created_at,
-	si.public_id::text, si.barcode
+	si.public_id::text, si.barcode, si.serial_number
 `
 
 const transactionItemFrom = `
@@ -73,6 +73,7 @@ type TransactionItemWithStockRef struct {
 	model.TransactionItem
 	StockItemPublicID string
 	Barcode           string
+	SerialNumber      string
 }
 
 // TransactionWithParties is a transaction joined with its counterparty's
@@ -142,6 +143,7 @@ type BuyItemResult struct {
 	TransactionItem   model.TransactionItem
 	StockItemPublicID string
 	Barcode           string
+	SerialNumber      string
 }
 
 type TransactionRepository interface {
@@ -344,12 +346,13 @@ func (r *transactionRepository) CreateBuy(ctx context.Context, input CreateBuyIn
 }
 
 type newStockItem struct {
-	id          int64
-	publicID    string
-	barcode     string
-	productName string
-	weightGram  float64
-	priceTotal  float64
+	id           int64
+	publicID     string
+	barcode      string
+	serialNumber string
+	productName  string
+	weightGram   float64
+	priceTotal   float64
 }
 
 func (r *transactionRepository) tryBuy(ctx context.Context, input CreateBuyInput) (*model.Transaction, []BuyItemResult, error) {
@@ -400,12 +403,13 @@ func (r *transactionRepository) tryBuy(ctx context.Context, input CreateBuyInput
 		totalAmount += item.PriceTotal
 		totalWeight += weightGram
 		created = append(created, newStockItem{
-			id:          stockItemID,
-			publicID:    stockItemPublicID,
-			barcode:     barcode,
-			productName: productName,
-			weightGram:  weightGram,
-			priceTotal:  item.PriceTotal,
+			id:           stockItemID,
+			publicID:     stockItemPublicID,
+			barcode:      barcode,
+			serialNumber: item.SerialNumber,
+			productName:  productName,
+			weightGram:   weightGram,
+			priceTotal:   item.PriceTotal,
 		})
 	}
 
@@ -474,6 +478,7 @@ func (r *transactionRepository) tryBuy(ctx context.Context, input CreateBuyInput
 			TransactionItem:   txItem,
 			StockItemPublicID: ns.publicID,
 			Barcode:           ns.barcode,
+			SerialNumber:      ns.serialNumber,
 		})
 	}
 
@@ -496,7 +501,7 @@ func scanTransactionItemWithStockRef(row pgx.Row, it *TransactionItemWithStockRe
 	return row.Scan(
 		&it.ID, &it.PublicID, &it.TransactionID, &it.StockItemID, &it.ProductName,
 		&it.WeightGram, &it.PricePerGram, &it.PriceTotal, &it.COGS, &it.CreatedAt,
-		&it.StockItemPublicID, &it.Barcode,
+		&it.StockItemPublicID, &it.Barcode, &it.SerialNumber,
 	)
 }
 

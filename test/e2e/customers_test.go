@@ -24,6 +24,9 @@ type customerListDTO struct {
 
 func createCustomer(t *testing.T, token string, body map[string]any) customerDTO {
 	t.Helper()
+	if _, ok := body["phone"]; !ok {
+		body["phone"] = "081200000000"
+	}
 	status, resp := doRequest(t, http.MethodPost, "/api/customers/", body, token)
 	if status != http.StatusCreated {
 		t.Fatalf("create customer fixture: expected 201, got %d (resp=%+v)", status, resp)
@@ -100,9 +103,10 @@ func TestCustomers_CreateListGetUpdateDelete(t *testing.T) {
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
 
-	// Create with only name — other fields optional.
+	// Create with only name+phone — the rest stay optional.
 	status, resp := doRequest(t, http.MethodPost, "/api/customers/", map[string]any{
-		"name": "Budi Santoso",
+		"name":  "Budi Santoso",
+		"phone": "081200000001",
 	}, adminToken)
 	if status != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
@@ -115,7 +119,10 @@ func TestCustomers_CreateListGetUpdateDelete(t *testing.T) {
 	if !created.IsActive {
 		t.Fatal("create: expected is_active=true by default")
 	}
-	if created.Phone != "" || created.Email != "" || created.IDType != "" || created.IDNumber != "" || created.Address != "" || created.Notes != "" {
+	if created.Phone != "081200000001" {
+		t.Fatalf("create: expected phone to be set, got %+v", created)
+	}
+	if created.Email != "" || created.IDType != "" || created.IDNumber != "" || created.Address != "" || created.Notes != "" {
 		t.Fatalf("create: expected empty optional fields, got %+v", created)
 	}
 
@@ -204,7 +211,21 @@ func TestCustomers_CreateInvalidIDType(t *testing.T) {
 
 	status, resp := doRequest(t, http.MethodPost, "/api/customers/", map[string]any{
 		"name":    "Budi Santoso",
+		"phone":   "081200000001",
 		"id_type": "NPWP",
+	}, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestCustomers_CreateMissingPhone(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodPost, "/api/customers/", map[string]any{
+		"name": "Budi Santoso",
 	}, adminToken)
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)

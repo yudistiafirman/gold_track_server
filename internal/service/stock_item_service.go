@@ -36,6 +36,7 @@ var allowedStockStatuses = map[string]struct{}{
 type StockItemSummary struct {
 	PublicID      string
 	Product       ProductRef
+	WeightGram    float64
 	Barcode       string
 	SerialNumber  string
 	Condition     string
@@ -174,7 +175,7 @@ func (s *stockItemService) Create(ctx context.Context, input CreateStockItemInpu
 		return StockItemSummary{}, apperror.Internal("failed to create stock item", err)
 	}
 
-	return toStockItemSummary(created, ProductRef{PublicID: product.PublicID, Name: product.Name}), nil
+	return toStockItemSummary(created, ProductRef{PublicID: product.PublicID, Name: product.Name}, product.WeightGram), nil
 }
 
 func (s *stockItemService) List(ctx context.Context, input ListStockItemsInput) (StockItemListResult, error) {
@@ -353,7 +354,7 @@ func validateStockItemFields(serialNumber, condition string, purchasePrice float
 	return purchaseDate, nil
 }
 
-func toStockItemSummary(s *model.StockItem, product ProductRef) StockItemSummary {
+func toStockItemSummary(s *model.StockItem, product ProductRef, weightGram float64) StockItemSummary {
 	notes := ""
 	if s.Notes != nil {
 		notes = *s.Notes
@@ -361,6 +362,7 @@ func toStockItemSummary(s *model.StockItem, product ProductRef) StockItemSummary
 	return StockItemSummary{
 		PublicID:      s.PublicID,
 		Product:       product,
+		WeightGram:    weightGram,
 		Barcode:       s.Barcode,
 		SerialNumber:  s.SerialNumber,
 		Condition:     s.Condition,
@@ -375,5 +377,5 @@ func toStockItemSummary(s *model.StockItem, product ProductRef) StockItemSummary
 }
 
 func toStockItemSummaryFromRefs(s *repository.StockItemWithRefs) StockItemSummary {
-	return toStockItemSummary(&s.StockItem, ProductRef{PublicID: s.ProductPublicID, Name: s.ProductName})
+	return toStockItemSummary(&s.StockItem, ProductRef{PublicID: s.ProductPublicID, Name: s.ProductName}, s.ProductWeight)
 }

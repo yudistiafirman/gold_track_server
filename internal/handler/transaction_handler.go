@@ -27,6 +27,7 @@ type transactionItemResponse struct {
 	ID           string  `json:"id"`
 	StockItemID  string  `json:"stock_item_id"`
 	Barcode      string  `json:"barcode"`
+	SerialNumber string  `json:"serial_number"`
 	ProductName  string  `json:"product_name"`
 	WeightGram   float64 `json:"weight_gram"`
 	PricePerGram float64 `json:"price_per_gram"`
@@ -54,6 +55,7 @@ func toTransactionResponse(t service.TransactionSummary) transactionResponse {
 			ID:           it.PublicID,
 			StockItemID:  it.StockItemPublicID,
 			Barcode:      it.Barcode,
+			SerialNumber: it.SerialNumber,
 			ProductName:  it.ProductName,
 			WeightGram:   it.WeightGram,
 			PricePerGram: it.PricePerGram,

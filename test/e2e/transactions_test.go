@@ -15,6 +15,7 @@ type transactionItemDTO struct {
 	ID           string  `json:"id"`
 	StockItemID  string  `json:"stock_item_id"`
 	Barcode      string  `json:"barcode"`
+	SerialNumber string  `json:"serial_number"`
 	ProductName  string  `json:"product_name"`
 	WeightGram   float64 `json:"weight_gram"`
 	PricePerGram float64 `json:"price_per_gram"`
@@ -336,6 +337,35 @@ func TestTransactions_CreateInvalidPaymentMethod(t *testing.T) {
 	}, adminToken)
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestTransactions_CreateAcceptsNewPaymentMethods(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	for i, method := range []string{"DEBIT", "KREDIT", "GOPAY", "OVO", "DANA", "SHOPEEPAY"} {
+		stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{
+			"serial_number": fmt.Sprintf("SN-PM-%d", i),
+		}))
+
+		status, resp := doRequest(t, http.MethodPost, "/api/transactions", map[string]any{
+			"type":           "SELL",
+			"customer_id":    customer.ID,
+			"payment_method": method,
+			"items":          []map[string]any{{"stock_item_id": stockItem.ID, "price_total": 100000}},
+		}, adminToken)
+		if status != http.StatusCreated {
+			t.Fatalf("payment_method=%s: expected 201, got %d (resp=%+v)", method, status, resp)
+		}
+		var created transactionDTO
+		decodeData(t, resp, &created)
+		if created.PaymentMethod != method {
+			t.Fatalf("payment_method=%s: expected echoed back, got %q", method, created.PaymentMethod)
+		}
 	}
 }
 
@@ -831,6 +861,9 @@ func TestTransactions_GetDetailReturnsFullItems(t *testing.T) {
 	if fetched.Items[0].StockItemID != stockItem.ID || fetched.Items[0].Barcode != stockItem.Barcode {
 		t.Fatalf("expected item stock_item_id/barcode populated, got %+v", fetched.Items[0])
 	}
+	if fetched.Items[0].SerialNumber != stockItem.SerialNumber {
+		t.Fatalf("expected item serial_number to match stock item, got %+v", fetched.Items[0])
+	}
 	if strings.Contains(strings.ToLower(string(resp.Data)), "cogs") {
 		t.Fatalf("detail response must never include cogs, got raw data: %s", resp.Data)
 	}
@@ -860,6 +893,9 @@ func TestTransactions_GetDetailWorksForBuyToo(t *testing.T) {
 	decodeData(t, resp, &fetched)
 	if fetched.Type != "BUY" || len(fetched.Items) != 1 {
 		t.Fatalf("expected BUY detail with 1 item, got %+v", fetched)
+	}
+	if fetched.Items[0].SerialNumber != "DETAIL-BUY-SN" {
+		t.Fatalf("expected item serial_number to match the buy input, got %+v", fetched.Items[0])
 	}
 }
 

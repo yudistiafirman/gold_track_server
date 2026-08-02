@@ -22,28 +22,42 @@ func NewStockItemHandler(stockItemService service.StockItemService) *StockItemHa
 	return &StockItemHandler{stockItemService: stockItemService}
 }
 
+// stockItemProductResponse nests weight_gram under product since it's a
+// product attribute (every unit of the same product weighs the same),
+// distinct from the bare {id, name} productRefResponse shared by
+// category/brand/supplier refs elsewhere.
+type stockItemProductResponse struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	WeightGram float64 `json:"weight_gram"`
+}
+
 // stockItemResponse.ID is the public_id (UUID) — the internal bigint PK is
 // never serialized to JSON. purchase_date is a plain "2006-01-02" string
 // (the column is a DATE, not a TIMESTAMPTZ).
 type stockItemResponse struct {
-	ID            string             `json:"id"`
-	Product       productRefResponse `json:"product"`
-	Barcode       string             `json:"barcode"`
-	SerialNumber  string             `json:"serial_number"`
-	Condition     string             `json:"condition"`
-	PurchasePrice float64            `json:"purchase_price"`
-	PurchaseDate  string             `json:"purchase_date"`
-	Status        string             `json:"status"`
-	SoldAt        *time.Time         `json:"sold_at"`
-	Notes         string             `json:"notes"`
-	CreatedAt     time.Time          `json:"created_at"`
-	UpdatedAt     time.Time          `json:"updated_at"`
+	ID            string                   `json:"id"`
+	Product       stockItemProductResponse `json:"product"`
+	Barcode       string                   `json:"barcode"`
+	SerialNumber  string                   `json:"serial_number"`
+	Condition     string                   `json:"condition"`
+	PurchasePrice float64                  `json:"purchase_price"`
+	PurchaseDate  string                   `json:"purchase_date"`
+	Status        string                   `json:"status"`
+	SoldAt        *time.Time               `json:"sold_at"`
+	Notes         string                   `json:"notes"`
+	CreatedAt     time.Time                `json:"created_at"`
+	UpdatedAt     time.Time                `json:"updated_at"`
 }
 
 func toStockItemResponse(s service.StockItemSummary) stockItemResponse {
 	return stockItemResponse{
-		ID:            s.PublicID,
-		Product:       toProductRefResponse(s.Product),
+		ID: s.PublicID,
+		Product: stockItemProductResponse{
+			ID:         s.Product.PublicID,
+			Name:       s.Product.Name,
+			WeightGram: s.WeightGram,
+		},
 		Barcode:       s.Barcode,
 		SerialNumber:  s.SerialNumber,
 		Condition:     s.Condition,

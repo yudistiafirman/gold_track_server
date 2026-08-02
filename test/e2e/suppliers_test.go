@@ -21,6 +21,9 @@ type supplierListDTO struct {
 
 func createSupplier(t *testing.T, adminToken string, body map[string]any) supplierDTO {
 	t.Helper()
+	if _, ok := body["phone"]; !ok {
+		body["phone"] = "081200000000"
+	}
 	status, resp := doRequest(t, http.MethodPost, "/api/suppliers/", body, adminToken)
 	if status != http.StatusCreated {
 		t.Fatalf("create supplier fixture: expected 201, got %d (resp=%+v)", status, resp)
@@ -67,9 +70,10 @@ func TestSuppliers_CreateListGetUpdateDelete(t *testing.T) {
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
 
-	// Create with only name — other fields optional.
+	// Create with only name+phone — the rest stay optional.
 	status, resp := doRequest(t, http.MethodPost, "/api/suppliers/", map[string]any{
-		"name": "Toko Emas Makmur",
+		"name":  "Toko Emas Makmur",
+		"phone": "081200000001",
 	}, adminToken)
 	if status != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
@@ -82,7 +86,10 @@ func TestSuppliers_CreateListGetUpdateDelete(t *testing.T) {
 	if !created.IsActive {
 		t.Fatal("create: expected is_active=true by default")
 	}
-	if created.Phone != "" || created.Address != "" || created.Notes != "" {
+	if created.Phone != "081200000001" {
+		t.Fatalf("create: expected phone to be set, got %+v", created)
+	}
+	if created.Address != "" || created.Notes != "" {
 		t.Fatalf("create: expected empty optional fields, got %+v", created)
 	}
 
@@ -155,6 +162,19 @@ func TestSuppliers_CreateMissingName(t *testing.T) {
 	adminToken := login(t, admin.Email, admin.Password)
 
 	status, resp := doRequest(t, http.MethodPost, "/api/suppliers/", map[string]any{}, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestSuppliers_CreateMissingPhone(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodPost, "/api/suppliers/", map[string]any{
+		"name": "Toko Emas Makmur",
+	}, adminToken)
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
 	}

@@ -106,13 +106,14 @@ func NewSupplierService(supplierRepo repository.SupplierRepository) SupplierServ
 
 func (s *supplierService) Create(ctx context.Context, input CreateSupplierInput) (SupplierSummary, error) {
 	name := strings.TrimSpace(input.Name)
-	if err := validateSupplierName(name); err != nil {
+	phone := strings.TrimSpace(input.Phone)
+	if err := validateSupplierFields(name, phone); err != nil {
 		return SupplierSummary{}, err
 	}
 
 	supplier := &model.Supplier{
 		Name:     name,
-		Phone:    nilIfEmpty(input.Phone),
+		Phone:    nilIfEmpty(phone),
 		Address:  nilIfEmpty(input.Address),
 		Notes:    nilIfEmpty(input.Notes),
 		IsActive: true,
@@ -175,7 +176,8 @@ func (s *supplierService) Get(ctx context.Context, publicID string) (SupplierSum
 
 func (s *supplierService) Update(ctx context.Context, input UpdateSupplierInput) (SupplierSummary, error) {
 	name := strings.TrimSpace(input.Name)
-	if err := validateSupplierName(name); err != nil {
+	phone := strings.TrimSpace(input.Phone)
+	if err := validateSupplierFields(name, phone); err != nil {
 		return SupplierSummary{}, err
 	}
 
@@ -188,7 +190,7 @@ func (s *supplierService) Update(ctx context.Context, input UpdateSupplierInput)
 	}
 
 	existing.Name = name
-	existing.Phone = nilIfEmpty(input.Phone)
+	existing.Phone = nilIfEmpty(phone)
 	existing.Address = nilIfEmpty(input.Address)
 	existing.Notes = nilIfEmpty(input.Notes)
 	existing.IsActive = input.IsActive
@@ -263,9 +265,12 @@ func (s *supplierService) ListHistory(ctx context.Context, input ListSupplierHis
 	}, nil
 }
 
-func validateSupplierName(name string) error {
+func validateSupplierFields(name, phone string) error {
 	if name == "" {
 		return apperror.BadRequest("name wajib diisi", nil)
+	}
+	if phone == "" {
+		return apperror.BadRequest("phone wajib diisi", nil)
 	}
 	return nil
 }

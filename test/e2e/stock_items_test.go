@@ -6,16 +6,22 @@ import (
 	"testing"
 )
 
+type stockItemProductDTO struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	WeightGram float64 `json:"weight_gram"`
+}
+
 type stockItemDTO struct {
-	ID            string        `json:"id"`
-	Product       productRefDTO `json:"product"`
-	Barcode       string        `json:"barcode"`
-	SerialNumber  string        `json:"serial_number"`
-	Condition     string        `json:"condition"`
-	PurchasePrice float64       `json:"purchase_price"`
-	PurchaseDate  string        `json:"purchase_date"`
-	Status        string        `json:"status"`
-	Notes         string        `json:"notes"`
+	ID            string              `json:"id"`
+	Product       stockItemProductDTO `json:"product"`
+	Barcode       string              `json:"barcode"`
+	SerialNumber  string              `json:"serial_number"`
+	Condition     string              `json:"condition"`
+	PurchasePrice float64             `json:"purchase_price"`
+	PurchaseDate  string              `json:"purchase_date"`
+	Status        string              `json:"status"`
+	Notes         string              `json:"notes"`
 }
 
 type stockItemListDTO struct {
@@ -649,6 +655,9 @@ func TestStockItems_LookupFoundAvailable(t *testing.T) {
 	decodeData(t, resp, &found)
 	if found.Barcode != created.Barcode || found.Condition != "GOOD" || found.Product.ID != product.ID {
 		t.Fatalf("expected unit+product+condition, got %+v", found)
+	}
+	if found.Product.WeightGram != 10 {
+		t.Fatalf("expected product.weight_gram 10, got %v", found.Product.WeightGram)
 	}
 }
 

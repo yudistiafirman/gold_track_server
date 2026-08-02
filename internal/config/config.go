@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -19,6 +20,7 @@ type Config struct {
 	App      AppConfig
 	Database DatabaseConfig
 	JWT      JWTConfig
+	CORS     CORSConfig
 }
 
 type AppConfig struct {
@@ -42,6 +44,10 @@ type DatabaseConfig struct {
 type JWTConfig struct {
 	Secret string
 	Expiry time.Duration
+}
+
+type CORSConfig struct {
+	AllowedOrigins []string
 }
 
 // DSN builds a PostgreSQL connection string from the database config.
@@ -105,6 +111,9 @@ func Load() (*Config, error) {
 			Secret: jwtSecret,
 			Expiry: getEnvDuration("JWT_EXPIRY", 24*time.Hour),
 		},
+		CORS: CORSConfig{
+			AllowedOrigins: getEnvList("CORS_ALLOWED_ORIGINS", []string{"*"}),
+		},
 	}
 
 	return cfg, nil
@@ -127,6 +136,26 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 	return i
+}
+
+// getEnvList reads a comma-separated env var into a trimmed string slice.
+func getEnvList(key string, fallback []string) []string {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+	parts := strings.Split(v, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	if len(result) == 0 {
+		return fallback
+	}
+	return result
 }
 
 func getEnvDuration(key string, fallback time.Duration) time.Duration {

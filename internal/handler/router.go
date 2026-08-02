@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 
+	"gold-track-be/internal/config"
 	appmw "gold-track-be/internal/middleware"
 	"gold-track-be/internal/service"
 )
@@ -20,6 +21,7 @@ import (
 // with appmw.RequireRole(...) for role-restricted actions.
 func NewRouter(
 	logger *slog.Logger,
+	corsConfig config.CORSConfig,
 	healthHandler *HealthHandler,
 	authHandler *AuthHandler,
 	authService service.AuthService,
@@ -39,6 +41,7 @@ func NewRouter(
 ) http.Handler {
 	r := chi.NewRouter()
 
+	r.Use(appmw.CORS(corsConfig.AllowedOrigins))
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(appmw.Recoverer(logger))

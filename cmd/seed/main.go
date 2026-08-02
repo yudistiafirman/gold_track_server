@@ -24,6 +24,23 @@ var defaultExpenseCategories = []string{
 	"Lain-lain",
 }
 
+// defaultCategories are seeded once; users can add more from the app.
+var defaultCategories = []string{
+	"Batangan",
+	"Koin",
+	"Perhiasan",
+	"Galeri",
+}
+
+// defaultBrands are seeded once; users can add more from the app.
+var defaultBrands = []string{
+	"Antam",
+	"UBS",
+	"Galeri24",
+	"Lotus Archi",
+	"King Halim",
+}
+
 type settingSeed struct {
 	Key         string
 	Value       string
@@ -59,6 +76,16 @@ func main() {
 		log.Fatalf("seed expense categories: %v", err)
 	}
 	fmt.Println("seeded expense categories")
+
+	if err := seedCategories(ctx, tx); err != nil {
+		log.Fatalf("seed categories: %v", err)
+	}
+	fmt.Println("seeded categories")
+
+	if err := seedBrands(ctx, tx); err != nil {
+		log.Fatalf("seed brands: %v", err)
+	}
+	fmt.Println("seeded brands")
 
 	if err := seedShopSettings(ctx, tx, adminID); err != nil {
 		log.Fatalf("seed shop settings: %v", err)
@@ -110,6 +137,32 @@ func seedExpenseCategories(ctx context.Context, tx pgx.Tx) error {
 		`, name)
 		if err != nil {
 			return fmt.Errorf("insert category %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func seedCategories(ctx context.Context, tx pgx.Tx) error {
+	for _, name := range defaultCategories {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO categories (name) VALUES ($1)
+			ON CONFLICT (lower(name)) DO NOTHING
+		`, name)
+		if err != nil {
+			return fmt.Errorf("insert category %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func seedBrands(ctx context.Context, tx pgx.Tx) error {
+	for _, name := range defaultBrands {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO brands (name) VALUES ($1)
+			ON CONFLICT (lower(name)) DO NOTHING
+		`, name)
+		if err != nil {
+			return fmt.Errorf("insert brand %q: %w", name, err)
 		}
 	}
 	return nil

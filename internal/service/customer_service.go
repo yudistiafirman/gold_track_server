@@ -95,14 +95,15 @@ func NewCustomerService(customerRepo repository.CustomerRepository) CustomerServ
 
 func (s *customerService) Create(ctx context.Context, input CreateCustomerInput) (CustomerSummary, error) {
 	name := strings.TrimSpace(input.Name)
+	phone := strings.TrimSpace(input.Phone)
 	idType := strings.TrimSpace(input.IDType)
-	if err := validateCustomerFields(name, idType); err != nil {
+	if err := validateCustomerFields(name, phone, idType); err != nil {
 		return CustomerSummary{}, err
 	}
 
 	customer := &model.Customer{
 		Name:     name,
-		Phone:    nilIfEmpty(input.Phone),
+		Phone:    nilIfEmpty(phone),
 		Email:    nilIfEmpty(input.Email),
 		IDType:   nilIfEmpty(idType),
 		IDNumber: nilIfEmpty(input.IDNumber),
@@ -168,8 +169,9 @@ func (s *customerService) Get(ctx context.Context, publicID string) (CustomerSum
 
 func (s *customerService) Update(ctx context.Context, input UpdateCustomerInput) (CustomerSummary, error) {
 	name := strings.TrimSpace(input.Name)
+	phone := strings.TrimSpace(input.Phone)
 	idType := strings.TrimSpace(input.IDType)
-	if err := validateCustomerFields(name, idType); err != nil {
+	if err := validateCustomerFields(name, phone, idType); err != nil {
 		return CustomerSummary{}, err
 	}
 
@@ -182,7 +184,7 @@ func (s *customerService) Update(ctx context.Context, input UpdateCustomerInput)
 	}
 
 	existing.Name = name
-	existing.Phone = nilIfEmpty(input.Phone)
+	existing.Phone = nilIfEmpty(phone)
 	existing.Email = nilIfEmpty(input.Email)
 	existing.IDType = nilIfEmpty(idType)
 	existing.IDNumber = nilIfEmpty(input.IDNumber)
@@ -210,9 +212,12 @@ func (s *customerService) Deactivate(ctx context.Context, publicID string) error
 	return nil
 }
 
-func validateCustomerFields(name, idType string) error {
+func validateCustomerFields(name, phone, idType string) error {
 	if name == "" {
 		return apperror.BadRequest("name wajib diisi", nil)
+	}
+	if phone == "" {
+		return apperror.BadRequest("phone wajib diisi", nil)
 	}
 	if idType != "" {
 		if _, ok := allowedIDTypes[idType]; !ok {

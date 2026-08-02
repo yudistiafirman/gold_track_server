@@ -23,10 +23,18 @@ var allowedTransactionTypes = map[string]struct{}{
 }
 
 var allowedPaymentMethods = map[string]struct{}{
-	"CASH":     {},
-	"TRANSFER": {},
-	"QRIS":     {},
+	"CASH":      {},
+	"TRANSFER":  {},
+	"QRIS":      {},
+	"DEBIT":     {},
+	"KREDIT":    {},
+	"GOPAY":     {},
+	"OVO":       {},
+	"DANA":      {},
+	"SHOPEEPAY": {},
 }
+
+const allowedPaymentMethodsMessage = "payment_method harus salah satu dari CASH, TRANSFER, QRIS, DEBIT, KREDIT, GOPAY, OVO, DANA, SHOPEEPAY"
 
 // TransactionItemSummary is the public-facing view of one unit within a
 // transaction (sold or bought) — cogs (the unit's wholesale cost) is
@@ -36,6 +44,7 @@ type TransactionItemSummary struct {
 	PublicID          string
 	StockItemPublicID string
 	Barcode           string
+	SerialNumber      string
 	ProductName       string
 	WeightGram        float64
 	PricePerGram      float64
@@ -172,7 +181,7 @@ func (s *transactionService) CreateSale(ctx context.Context, input CreateSaleInp
 		return TransactionSummary{}, apperror.BadRequest("type harus SELL atau SELL_SUPPLIER", nil)
 	}
 	if _, ok := allowedPaymentMethods[input.PaymentMethod]; !ok {
-		return TransactionSummary{}, apperror.BadRequest("payment_method harus CASH, TRANSFER, atau QRIS", nil)
+		return TransactionSummary{}, apperror.BadRequest(allowedPaymentMethodsMessage, nil)
 	}
 	if len(input.Items) == 0 {
 		return TransactionSummary{}, apperror.BadRequest("items wajib diisi minimal 1 unit", nil)
@@ -224,7 +233,7 @@ func (s *transactionService) CreateSale(ctx context.Context, input CreateSaleInp
 	// input.Items in order and returns transaction_items in that same
 	// order, so this lets us re-attach each result to the stock item's
 	// public_id/barcode without changing CreateSale's return shape.
-	stockItemRefs := make([]struct{ PublicID, Barcode string }, 0, len(input.Items))
+	stockItemRefs := make([]struct{ PublicID, Barcode, SerialNumber string }, 0, len(input.Items))
 	for _, item := range input.Items {
 		stockItem, err := s.stockItemRepo.FindByPublicID(ctx, item.StockItemPublicID)
 		if err != nil {
@@ -238,7 +247,7 @@ func (s *transactionService) CreateSale(ctx context.Context, input CreateSaleInp
 			PriceTotal:  item.PriceTotal,
 			Confirmed:   item.Confirmed,
 		})
-		stockItemRefs = append(stockItemRefs, struct{ PublicID, Barcode string }{stockItem.PublicID, stockItem.Barcode})
+		stockItemRefs = append(stockItemRefs, struct{ PublicID, Barcode, SerialNumber string }{stockItem.PublicID, stockItem.Barcode, stockItem.SerialNumber})
 	}
 
 	transaction, items, err := s.transactionRepo.CreateSale(ctx, repository.CreateSaleInput{
@@ -270,6 +279,7 @@ func (s *transactionService) CreateSale(ctx context.Context, input CreateSaleInp
 			PublicID:          it.PublicID,
 			StockItemPublicID: stockItemRefs[i].PublicID,
 			Barcode:           stockItemRefs[i].Barcode,
+			SerialNumber:      stockItemRefs[i].SerialNumber,
 			ProductName:       it.ProductName,
 			WeightGram:        it.WeightGram,
 			PricePerGram:      it.PricePerGram,
@@ -294,7 +304,7 @@ func (s *transactionService) CreateSale(ctx context.Context, input CreateSaleInp
 
 func (s *transactionService) CreateBuy(ctx context.Context, input CreateBuyInput) (TransactionSummary, error) {
 	if _, ok := allowedPaymentMethods[input.PaymentMethod]; !ok {
-		return TransactionSummary{}, apperror.BadRequest("payment_method harus CASH, TRANSFER, atau QRIS", nil)
+		return TransactionSummary{}, apperror.BadRequest(allowedPaymentMethodsMessage, nil)
 	}
 	if len(input.Items) == 0 {
 		return TransactionSummary{}, apperror.BadRequest("items wajib diisi minimal 1 unit", nil)
@@ -379,6 +389,7 @@ func (s *transactionService) CreateBuy(ctx context.Context, input CreateBuyInput
 			PublicID:          r.TransactionItem.PublicID,
 			StockItemPublicID: r.StockItemPublicID,
 			Barcode:           r.Barcode,
+			SerialNumber:      r.SerialNumber,
 			ProductName:       r.TransactionItem.ProductName,
 			WeightGram:        r.TransactionItem.WeightGram,
 			PricePerGram:      r.TransactionItem.PricePerGram,
@@ -470,6 +481,7 @@ func (s *transactionService) Get(ctx context.Context, publicID string) (Transact
 			PublicID:          it.PublicID,
 			StockItemPublicID: it.StockItemPublicID,
 			Barcode:           it.Barcode,
+			SerialNumber:      it.SerialNumber,
 			ProductName:       it.ProductName,
 			WeightGram:        it.WeightGram,
 			PricePerGram:      it.PricePerGram,
@@ -548,6 +560,7 @@ func (s *transactionService) GetReceipt(ctx context.Context, publicID string) (R
 			PublicID:          it.PublicID,
 			StockItemPublicID: it.StockItemPublicID,
 			Barcode:           it.Barcode,
+			SerialNumber:      it.SerialNumber,
 			ProductName:       it.ProductName,
 			WeightGram:        it.WeightGram,
 			PricePerGram:      it.PricePerGram,
