@@ -19,6 +19,7 @@ type receivedUnitDTO struct {
 	Barcode      string `json:"barcode"`
 	ProductName  string `json:"product_name"`
 	SerialNumber string `json:"serial_number"`
+	Condition    string `json:"condition"`
 }
 
 type purchaseOrderDTO struct {
@@ -407,9 +408,14 @@ func TestPurchaseOrders_ReceiveSuccess(t *testing.T) {
 		{"product_id": product.ID, "quantity": 2, "purchase_price": 800000},
 	})
 
+	// Mixed conditions in the same shipment — not every unit is guaranteed
+	// to arrive GOOD, so condition is per-serial, not per-item.
 	status, resp := doRequest(t, http.MethodPost, "/api/purchase-orders/"+po.ID+"/receive", map[string]any{
 		"items": []map[string]any{
-			{"product_id": product.ID, "serials": []string{"PO-SN-1", "PO-SN-2"}, "condition": "GOOD"},
+			{"product_id": product.ID, "serials": []map[string]any{
+				{"serial_number": "PO-SN-1", "condition": "GOOD"},
+				{"serial_number": "PO-SN-2", "condition": "BAD"},
+			}},
 		},
 	}, adminToken)
 	if status != http.StatusOK {
@@ -428,12 +434,17 @@ func TestPurchaseOrders_ReceiveSuccess(t *testing.T) {
 		t.Fatalf("expected 2 received_units, got %d", len(received.ReceivedUnits))
 	}
 
+	expectedConditions := map[string]string{"PO-SN-1": "GOOD", "PO-SN-2": "BAD"}
 	seenBarcodes := map[string]bool{}
 	for _, unit := range received.ReceivedUnits {
 		if seenBarcodes[unit.Barcode] {
 			t.Fatalf("expected unique barcodes, got duplicate %q", unit.Barcode)
 		}
 		seenBarcodes[unit.Barcode] = true
+
+		if unit.Condition != expectedConditions[unit.SerialNumber] {
+			t.Fatalf("expected serial %q to have condition %q, got %q", unit.SerialNumber, expectedConditions[unit.SerialNumber], unit.Condition)
+		}
 
 		status, resp := doRequest(t, http.MethodGet, "/api/stock-items/"+unit.StockItemID, nil, adminToken)
 		if status != http.StatusOK {
@@ -443,6 +454,9 @@ func TestPurchaseOrders_ReceiveSuccess(t *testing.T) {
 		decodeData(t, resp, &stockItem)
 		if stockItem.Status != "AVAILABLE" {
 			t.Fatalf("expected AVAILABLE, got %q", stockItem.Status)
+		}
+		if stockItem.Condition != expectedConditions[unit.SerialNumber] {
+			t.Fatalf("expected stock item condition %q, got %q", expectedConditions[unit.SerialNumber], stockItem.Condition)
 		}
 		if stockItem.PurchasePrice != 800000 {
 			t.Fatalf("expected purchase_price=800000, got %v", stockItem.PurchasePrice)
@@ -472,7 +486,7 @@ func TestPurchaseOrders_ReceiveWrongSerialCount(t *testing.T) {
 
 	status, resp := doRequest(t, http.MethodPost, "/api/purchase-orders/"+po.ID+"/receive", map[string]any{
 		"items": []map[string]any{
-			{"product_id": product.ID, "serials": []string{"PO-SN-1"}, "condition": "GOOD"},
+			{"product_id": product.ID, "serials": []map[string]any{{"serial_number": "PO-SN-1", "condition": "GOOD"}}},
 		},
 	}, adminToken)
 	if status != http.StatusBadRequest {
@@ -497,7 +511,7 @@ func TestPurchaseOrders_ReceiveMissingProductCoverage(t *testing.T) {
 
 	status, resp := doRequest(t, http.MethodPost, "/api/purchase-orders/"+po.ID+"/receive", map[string]any{
 		"items": []map[string]any{
-			{"product_id": product1.ID, "serials": []string{"PO-SN-COVER-1"}, "condition": "GOOD"},
+			{"product_id": product1.ID, "serials": []map[string]any{{"serial_number": "PO-SN-COVER-1", "condition": "GOOD"}}},
 		},
 	}, adminToken)
 	if status != http.StatusBadRequest {
@@ -517,7 +531,7 @@ func TestPurchaseOrders_ReceiveEmptySerial(t *testing.T) {
 
 	status, resp := doRequest(t, http.MethodPost, "/api/purchase-orders/"+po.ID+"/receive", map[string]any{
 		"items": []map[string]any{
-			{"product_id": product.ID, "serials": []string{""}, "condition": "GOOD"},
+			{"product_id": product.ID, "serials": []map[string]any{{"serial_number": "", "condition": "GOOD"}}},
 		},
 	}, adminToken)
 	if status != http.StatusUnprocessableEntity {
@@ -537,7 +551,7 @@ func TestPurchaseOrders_ReceiveInvalidCondition(t *testing.T) {
 
 	status, resp := doRequest(t, http.MethodPost, "/api/purchase-orders/"+po.ID+"/receive", map[string]any{
 		"items": []map[string]any{
-			{"product_id": product.ID, "serials": []string{"PO-SN-COND"}, "condition": "OK"},
+			{"product_id": product.ID, "serials": []map[string]any{{"serial_number": "PO-SN-COND", "condition": "OK"}}},
 		},
 	}, adminToken)
 	if status != http.StatusUnprocessableEntity {
@@ -557,7 +571,7 @@ func TestPurchaseOrders_ReceiveDuplicateSerialInBatch(t *testing.T) {
 
 	status, resp := doRequest(t, http.MethodPost, "/api/purchase-orders/"+po.ID+"/receive", map[string]any{
 		"items": []map[string]any{
-			{"product_id": product.ID, "serials": []string{"DUP-SN", "DUP-SN"}, "condition": "GOOD"},
+			{"product_id": product.ID, "serials": []map[string]any{{"serial_number": "DUP-SN", "condition": "GOOD"}, {"serial_number": "DUP-SN", "condition": "GOOD"}}},
 		},
 	}, adminToken)
 	if status != http.StatusConflict {
@@ -577,7 +591,7 @@ func TestPurchaseOrders_ReceiveAlreadyReceivedRejected(t *testing.T) {
 
 	body := map[string]any{
 		"items": []map[string]any{
-			{"product_id": product.ID, "serials": []string{"ONCE-SN"}, "condition": "GOOD"},
+			{"product_id": product.ID, "serials": []map[string]any{{"serial_number": "ONCE-SN", "condition": "GOOD"}}},
 		},
 	}
 	status, resp := doRequest(t, http.MethodPost, "/api/purchase-orders/"+po.ID+"/receive", body, adminToken)
@@ -587,7 +601,7 @@ func TestPurchaseOrders_ReceiveAlreadyReceivedRejected(t *testing.T) {
 
 	status, resp = doRequest(t, http.MethodPost, "/api/purchase-orders/"+po.ID+"/receive", map[string]any{
 		"items": []map[string]any{
-			{"product_id": product.ID, "serials": []string{"TWICE-SN"}, "condition": "GOOD"},
+			{"product_id": product.ID, "serials": []map[string]any{{"serial_number": "TWICE-SN", "condition": "GOOD"}}},
 		},
 	}, adminToken)
 	if status != http.StatusConflict {
@@ -668,7 +682,7 @@ func TestPurchaseOrders_CancelAlreadyReceivedRejected(t *testing.T) {
 
 	status, resp := doRequest(t, http.MethodPost, "/api/purchase-orders/"+po.ID+"/receive", map[string]any{
 		"items": []map[string]any{
-			{"product_id": product.ID, "serials": []string{"RECV-SN"}, "condition": "GOOD"},
+			{"product_id": product.ID, "serials": []map[string]any{{"serial_number": "RECV-SN", "condition": "GOOD"}}},
 		},
 	}, adminToken)
 	if status != http.StatusOK {

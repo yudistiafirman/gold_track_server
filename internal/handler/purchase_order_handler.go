@@ -34,6 +34,7 @@ type receivedUnitResponse struct {
 	Barcode      string `json:"barcode"`
 	ProductName  string `json:"product_name"`
 	SerialNumber string `json:"serial_number"`
+	Condition    string `json:"condition"`
 }
 
 // purchaseOrderResponse.Items is omitted (empty) for list rows — only
@@ -70,6 +71,7 @@ func toPurchaseOrderResponse(po service.PurchaseOrderSummary) purchaseOrderRespo
 			Barcode:      u.Barcode,
 			ProductName:  u.ProductName,
 			SerialNumber: u.SerialNumber,
+			Condition:    u.Condition,
 		})
 	}
 
@@ -187,10 +189,17 @@ func (h *PurchaseOrderHandler) Get(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, toPurchaseOrderResponse(result))
 }
 
+// receivePOSerialRequest is one physical unit arriving — condition is
+// per-serial since a single shipment isn't guaranteed to be uniformly
+// GOOD or BAD.
+type receivePOSerialRequest struct {
+	SerialNumber string `json:"serial_number"`
+	Condition    string `json:"condition"`
+}
+
 type receivePOItemRequest struct {
-	ProductID string   `json:"product_id"`
-	Serials   []string `json:"serials"`
-	Condition string   `json:"condition"`
+	ProductID string                   `json:"product_id"`
+	Serials   []receivePOSerialRequest `json:"serials"`
 }
 
 type receivePORequest struct {
@@ -218,10 +227,16 @@ func (h *PurchaseOrderHandler) Receive(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]service.ReceivePOItemInput, 0, len(req.Items))
 	for _, it := range req.Items {
+		serials := make([]service.ReceivePOSerialInput, 0, len(it.Serials))
+		for _, s := range it.Serials {
+			serials = append(serials, service.ReceivePOSerialInput{
+				SerialNumber: s.SerialNumber,
+				Condition:    s.Condition,
+			})
+		}
 		items = append(items, service.ReceivePOItemInput{
 			ProductPublicID: it.ProductID,
-			Serials:         it.Serials,
-			Condition:       it.Condition,
+			Serials:         serials,
 		})
 	}
 

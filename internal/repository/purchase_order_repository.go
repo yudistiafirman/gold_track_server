@@ -89,6 +89,14 @@ type POFilter struct {
 	Limit  int
 }
 
+// ReceiveSerialInput is one physical unit arriving — condition is captured
+// per serial since a single shipment isn't guaranteed to be uniformly
+// GOOD or BAD.
+type ReceiveSerialInput struct {
+	SerialNumber string
+	Condition    string
+}
+
 // ReceiveItemInput is one product's physical units arriving — ProductID is
 // the internal id, already resolved from the client-supplied public_id by
 // the service layer. PurchasePrice is deliberately not here: the
@@ -96,8 +104,7 @@ type POFilter struct {
 // client to supply it again at receive time.
 type ReceiveItemInput struct {
 	ProductID int64
-	Serials   []string
-	Condition string
+	Serials   []ReceiveSerialInput
 }
 
 type ReceivePOInput struct {
@@ -370,8 +377,8 @@ func (r *purchaseOrderRepository) tryReceive(ctx context.Context, poPublicID str
 
 			unit := model.StockItem{
 				ProductID:     item.ProductID,
-				SerialNumber:  serial,
-				Condition:     item.Condition,
+				SerialNumber:  serial.SerialNumber,
+				Condition:     serial.Condition,
 				PurchasePrice: purchasePrice,
 				PurchaseDate:  purchaseDate,
 				POID:          &poID,

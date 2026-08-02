@@ -41,6 +41,7 @@ type ReceivedUnitSummary struct {
 	Barcode           string
 	ProductName       string
 	SerialNumber      string
+	Condition         string
 }
 
 // PurchaseOrderSummary is the public-facing view of a PO: only PublicID
@@ -86,10 +87,17 @@ type PurchaseOrderListResult struct {
 	TotalPages int
 }
 
+// ReceivePOSerialInput is one physical unit arriving — condition is
+// captured per serial since a single shipment isn't guaranteed to be
+// uniformly GOOD or BAD.
+type ReceivePOSerialInput struct {
+	SerialNumber string
+	Condition    string
+}
+
 type ReceivePOItemInput struct {
 	ProductPublicID string
-	Serials         []string
-	Condition       string
+	Serials         []ReceivePOSerialInput
 }
 
 type ReceivePOInput struct {
@@ -280,8 +288,7 @@ func (s *purchaseOrderService) Receive(ctx context.Context, input ReceivePOInput
 	type resolvedItem struct {
 		productID   int64
 		productName string
-		serials     []string
-		condition   string
+		serials     []repository.ReceiveSerialInput
 	}
 
 	seenSerials := make(map[string]struct{})
@@ -292,18 +299,21 @@ func (s *purchaseOrderService) Receive(ctx context.Context, input ReceivePOInput
 		if len(item.Serials) == 0 {
 			return PurchaseOrderSummary{}, apperror.UnprocessableEntity("serials wajib diisi di setiap item", nil)
 		}
-		if _, ok := allowedConditions[item.Condition]; !ok {
-			return PurchaseOrderSummary{}, apperror.UnprocessableEntity("condition wajib diisi dan harus GOOD atau BAD di setiap item", nil)
-		}
+
+		repoSerials := make([]repository.ReceiveSerialInput, 0, len(item.Serials))
 		for _, serial := range item.Serials {
-			trimmed := strings.TrimSpace(serial)
+			trimmed := strings.TrimSpace(serial.SerialNumber)
 			if trimmed == "" {
 				return PurchaseOrderSummary{}, apperror.UnprocessableEntity("serial_number wajib diisi di setiap unit", nil)
+			}
+			if _, ok := allowedConditions[serial.Condition]; !ok {
+				return PurchaseOrderSummary{}, apperror.UnprocessableEntity("condition wajib diisi dan harus GOOD atau BAD di setiap unit", nil)
 			}
 			if _, dup := seenSerials[trimmed]; dup {
 				return PurchaseOrderSummary{}, apperror.Conflict("serial_number tidak boleh sama antar unit dalam satu penerimaan", nil)
 			}
 			seenSerials[trimmed] = struct{}{}
+			repoSerials = append(repoSerials, repository.ReceiveSerialInput{SerialNumber: trimmed, Condition: serial.Condition})
 		}
 
 		product, err := s.productRepo.FindByPublicID(ctx, item.ProductPublicID)
@@ -317,8 +327,7 @@ func (s *purchaseOrderService) Receive(ctx context.Context, input ReceivePOInput
 		resolved = append(resolved, resolvedItem{
 			productID:   product.ID,
 			productName: product.Name,
-			serials:     item.Serials,
-			condition:   item.Condition,
+			serials:     repoSerials,
 		})
 		requestQuantities[product.ID] = len(item.Serials)
 	}
@@ -352,7 +361,6 @@ func (s *purchaseOrderService) Receive(ctx context.Context, input ReceivePOInput
 		repoItems = append(repoItems, repository.ReceiveItemInput{
 			ProductID: r.productID,
 			Serials:   r.serials,
-			Condition: r.condition,
 		})
 		productNames[r.productID] = r.productName
 	}
@@ -381,6 +389,7 @@ func (s *purchaseOrderService) Receive(ctx context.Context, input ReceivePOInput
 			Barcode:           u.Barcode,
 			ProductName:       productNames[u.ProductID],
 			SerialNumber:      u.SerialNumber,
+			Condition:         u.Condition,
 		})
 	}
 

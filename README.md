@@ -74,7 +74,10 @@ Urutan file (`000001`…`000016`) mengikuti dependency FK: `users` → `supplier
 `000020` meng-ALTER `customers` nambah kolom `is_active` (tabel aslinya di `000001`…`000016`
 belum punya, beda dari resource lain yang dari awal sudah punya). `000021` meng-ALTER
 `stock_items` nambah `UNIQUE` constraint di `serial_number` (BE-801) — sebelumnya cuma
-`barcode`/`public_id` yang unik di tabel itu.
+`barcode`/`public_id` yang unik di tabel itu. `000022` meng-ALTER `suppliers`/`customers`
+supaya kolom `phone` jadi `NOT NULL` (sebelumnya nullable/opsional). `000023` meng-ALTER
+CHECK constraint `payment_method` di `transactions` supaya terima metode baru (lihat
+`### /api/transactions` di bawah), bukan cuma `CASH`/`TRANSFER`/`QRIS`.
 
 Menambah migrasi baru: buat pasangan file
 `migrations/{next_number}_{deskripsi}.up.sql` dan `.down.sql`.
@@ -88,6 +91,8 @@ go run ./cmd/seed
 Membuat (kalau belum ada — aman dijalankan berkali-kali, tidak duplikat):
 - 1 user `SUPER_ADMIN` (email/password dari `SEED_ADMIN_*`, default `admin@goldtrack.local` / `ChangeMe123!` — **ganti setelah login pertama**), password disimpan sebagai bcrypt hash.
 - 7 `expense_categories` default: Listrik, Wifi/Internet, ATK, Gaji Karyawan, Sewa Tempat, Transportasi, Lain-lain.
+- 4 `categories` default: Batangan, Koin, Perhiasan, Galeri.
+- 5 `brands` default: Antam, UBS, Galeri24, Lotus Archi, King Halim.
 - 3 `settings` data toko (`shop_name`, `shop_address`, `shop_phone`) dari `SEED_SHOP_*`.
 
 Data toko yang sudah pernah diubah lewat aplikasi tidak akan ditimpa ulang oleh seeder (`ON CONFLICT DO NOTHING`); password admin yang sudah ada juga tidak direset di run berikutnya.
@@ -474,16 +479,17 @@ sama persis dengan `POST` untuk validasi field/kategori/brand):
 
 ```bash
 GET    /api/suppliers                  # ?search=&page=&limit=                        -> 200
-POST   /api/suppliers                  # { name, phone?, address?, notes? }            -> 201
+POST   /api/suppliers                  # { name, phone, address?, notes? }             -> 201
 GET    /api/suppliers/{id}             # detail supplier                                -> 200 / 404
-PUT    /api/suppliers/{id}             # { name, phone?, address?, notes?, is_active }  -> 200 / 404
+PUT    /api/suppliers/{id}             # { name, phone, address?, notes?, is_active }   -> 200 / 404
 DELETE /api/suppliers/{id}             # soft delete (is_active=false)                  -> 200 / 404
 GET    /api/suppliers/{id}/transactions # ?page=&limit= — riwayat gabungan (lihat bawah) -> 200 / 404
 ```
 
-`{id}` adalah `public_id` (UUID). Cuma `name` yang wajib — `phone`/`address`/`notes` opsional,
-dikosongkan (`""`) di request berarti `NULL` di DB. `PUT` full-replace seperti resource lain
-(kirim semua field yang bisa diedit, bukan partial patch).
+`{id}` adalah `public_id` (UUID). `name` dan `phone` wajib (migration `000022` menambahkan
+`NOT NULL` di kolom `phone`, ditambah validasi 400 di service kalau kosong) — `address`/`notes`
+opsional, dikosongkan (`""`) di request berarti `NULL` di DB. `PUT` full-replace seperti resource
+lain (kirim semua field yang bisa diedit, bukan partial patch).
 
 Beda dari `/api/products` (BE-202): `GET /api/suppliers` **tidak** memfilter `is_active` — supplier
 yang sudah diarsipkan tetap muncul di list (field `is_active` di response tinggal dicek klien),
@@ -561,6 +567,9 @@ Contoh response error:
 // 400 — name kosong
 {"success":false,"error":{"code":"BAD_REQUEST","message":"name wajib diisi"}}
 
+// 400 — phone kosong
+{"success":false,"error":{"code":"BAD_REQUEST","message":"phone wajib diisi"}}
+
 // 404 — public_id valid tapi tidak ada
 {"success":false,"error":{"code":"NOT_FOUND","message":"supplier tidak ditemukan"}}
 
@@ -572,7 +581,7 @@ Contoh response error:
 
 ```bash
 GET    /api/customers                 # ?search=&page=&limit=                              -> 200 (ADMIN, KASIR, SUPER_ADMIN)
-POST   /api/customers                 # { name, phone?, email?, id_type?, id_number?, address?, notes? } -> 201 (ADMIN, KASIR, SUPER_ADMIN)
+POST   /api/customers                 # { name, phone, email?, id_type?, id_number?, address?, notes? } -> 201 (ADMIN, KASIR, SUPER_ADMIN)
 GET    /api/customers/{id}            # detail pelanggan                                     -> 200 / 404 (ADMIN, KASIR, SUPER_ADMIN)
 GET    /api/customers/{id}/transactions  # riwayat transaksi SELL & BUY, ?page=&limit=        -> 200 / 404 (semua role, token valid)
 PUT    /api/customers/{id}            # field yang sama + is_active                          -> 200 / 404 (ADMIN & SUPER_ADMIN)
@@ -586,10 +595,11 @@ pelanggan baru & cari data pelanggan pas transaksi. `PUT`/`DELETE` tetap dikunci
 `JWTAuth` tanpa `RequireRole` tambahan, sedangkan `PUT`/`DELETE /customers/{id}` ada di grup
 `RequireRole("ADMIN", "SUPER_ADMIN")` yang sama dengan resource admin-only lainnya).
 
-Cuma `name` yang wajib. `id_type`, kalau diisi, harus `KTP`/`SIM`/`PASSPORT` (400 kalau bukan).
-`?search` cocok ke `name` **atau** `phone` (satu query param, match salah satu). Sama seperti
-`/api/suppliers`: list **tidak** memfilter `is_active` — pelanggan yang diarsipkan tetap muncul
-di list (berguna buat cari histori transaksi pelanggan lama).
+`name` dan `phone` wajib (migration `000022`, sama seperti `/api/suppliers`). `id_type`, kalau
+diisi, harus `KTP`/`SIM`/`PASSPORT` (400 kalau bukan). `?search` cocok ke `name` **atau** `phone`
+(satu query param, match salah satu). Sama seperti `/api/suppliers`: list **tidak** memfilter
+`is_active` — pelanggan yang diarsipkan tetap muncul di list (berguna buat cari histori
+transaksi pelanggan lama).
 
 Contoh response `POST /api/customers` (201):
 ```json
@@ -618,6 +628,9 @@ Contoh response error:
 
 // 400 — name kosong
 {"success":false,"error":{"code":"BAD_REQUEST","message":"name wajib diisi"}}
+
+// 400 — phone kosong
+{"success":false,"error":{"code":"BAD_REQUEST","message":"phone wajib diisi"}}
 
 // 400 — id_type bukan KTP/SIM/PASSPORT
 {"success":false,"error":{"code":"BAD_REQUEST","message":"id_type harus KTP, SIM, atau PASSPORT"}}
@@ -711,6 +724,10 @@ DELETE /api/stock-items/{id}                   # HARD delete, hanya unit AVAILAB
   ulang label diperbolehkan, tidak difilter status.
 - `supplier_id`/`po_id` di luar scope saat ini — selalu `NULL` (belum ada resource purchase
   order, dan `supplier_id` belum diterima lewat body ini).
+- **`product.weight_gram` ikut di setiap response** (create, get, list, lookup) — nested di
+  dalam objek `product` (bukan top-level), karena berat itu atribut produk (semua unit dari
+  produk yang sama beratnya pasti sama), pakai DTO terpisah dari `productRefResponse` yang
+  dipakai category/brand/supplier di tempat lain (yang tidak punya berat).
 
 #### GET /api/stock-items/lookup — cari unit via barcode (BE-701/BE-703)
 
@@ -732,7 +749,7 @@ Contoh response (200):
   "success": true,
   "data": {
     "id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
-    "product": { "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f", "name": "Emas Batangan 10gr" },
+    "product": { "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f", "name": "Emas Batangan 10gr", "weight_gram": 10 },
     "barcode": "BAT-ANT-10-001-0001",
     "serial_number": "SN-0001",
     "condition": "BAD",
@@ -754,7 +771,7 @@ Contoh response `POST /api/products/{productId}/stock-items` (201):
   "success": true,
   "data": {
     "id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
-    "product": { "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f", "name": "Emas Batangan 10gr" },
+    "product": { "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f", "name": "Emas Batangan 10gr", "weight_gram": 10 },
     "barcode": "BAT-ANT-10-001-0001",
     "serial_number": "SN-0001",
     "condition": "GOOD",
@@ -898,17 +915,22 @@ Setiap unit yang berhasil terjual (`SELL`/`SELL_SUPPLIER`) otomatis jadi `status
 `sold_at` terisi (tidak bisa di-`PUT`/`DELETE` lagi setelahnya — lihat guard di section
 stock-items di atas).
 
-Response tiap item menyertakan `stock_item_id` (public_id) dan `barcode` unit yang
-bersangkutan — buat `SELL`/`SELL_SUPPLIER` itu unit yang sudah ada, buat `BUY` itu unit yang
-baru dibuat (langsung kepakai buat cetak label via `GET /api/stock-items/{id}/label`). Response
-**tidak pernah menyertakan `cogs`** (harga pokok/beli unit) — itu data margin toko, sengaja
-tidak diekspos ke response checkout yang kemungkinan dilihat kasir.
+Response tiap item menyertakan `stock_item_id` (public_id), `barcode`, dan `serial_number` unit
+yang bersangkutan — buat `SELL`/`SELL_SUPPLIER` itu unit yang sudah ada, buat `BUY` itu unit yang
+baru dibuat (langsung kepakai buat cetak label via `GET /api/stock-items/{id}/label`). Berlaku
+juga di `GET /api/transactions/{id}` dan `GET /api/transactions/{id}/receipt` (BE-1001) — bukan
+cuma di response create. Response **tidak pernah menyertakan `cogs`** (harga pokok/beli unit) —
+itu data margin toko, sengaja tidak diekspos ke response checkout yang kemungkinan dilihat kasir.
+
+`payment_method` harus salah satu dari `CASH`, `TRANSFER`, `QRIS`, `DEBIT`, `KREDIT`, `GOPAY`,
+`OVO`, `DANA`, `SHOPEEPAY` (guard di `allowedPaymentMethods`, `internal/service/transaction_service.go`,
+plus CHECK constraint yang sama di DB, migration `000023`) — nilai lain → 400.
 
 `payment_ref` adalah identifier bebas buat pembayaran non-tunai (nomor referensi transfer, nama
-e-wallet, dll — bukan enum tetap, `payment_method` sendiri yang sudah membedakan `CASH`/
-`TRANSFER`/`QRIS`). Selalu ikut kebalikin di response — di sini, di `GET /api/transactions/{id}`,
-maupun di `GET /api/customers/{id}/transactions` (riwayat) — kosong (`""`) kalau tidak diisi
-(lazimnya buat `CASH`).
+e-wallet, dll — bukan enum tetap, `payment_method` sendiri yang sudah membedakan metodenya).
+Selalu ikut kebalikin di response — di sini, di `GET /api/transactions/{id}`, maupun di
+`GET /api/customers/{id}/transactions` (riwayat) — kosong (`""`) kalau tidak diisi (lazimnya
+buat `CASH`).
 
 Contoh response `SELL` (201):
 ```json
@@ -928,6 +950,7 @@ Contoh response `SELL` (201):
         "id": "3c4d5e6f-7081-9012-cdef-012345678901",
         "stock_item_id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
         "barcode": "BAT-ANT-10-001-0001",
+        "serial_number": "SN-0001",
         "product_name": "Emas Batangan 10gr",
         "weight_gram": 10,
         "price_per_gram": 150000,
@@ -958,6 +981,7 @@ Contoh response `BUY` (201) — unit barunya langsung `AVAILABLE`:
         "id": "5e6f7081-9203-4415-ef01-234567890123",
         "stock_item_id": "6f708192-0334-5526-f012-345678901234",
         "barcode": "BAT-ANT-10-001-0002",
+        "serial_number": "SN-BUYBACK-01",
         "product_name": "Emas Batangan 10gr",
         "weight_gram": 10,
         "price_per_gram": 90000,
@@ -976,7 +1000,7 @@ Contoh response error:
 {"success":false,"error":{"code":"BAD_REQUEST","message":"type SELL wajib mengisi customer_id dan tidak boleh mengisi supplier_id"}}
 
 // 400 — payment_method invalid, items kosong, price_total <= 0, atau BUY produk diarsipkan
-{"success":false,"error":{"code":"BAD_REQUEST","message":"payment_method harus CASH, TRANSFER, atau QRIS"}}
+{"success":false,"error":{"code":"BAD_REQUEST","message":"payment_method harus salah satu dari CASH, TRANSFER, QRIS, DEBIT, KREDIT, GOPAY, OVO, DANA, SHOPEEPAY"}}
 
 // 422 — BUY, serial_number/condition kosong atau invalid per item
 {"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"serial_number wajib diisi di setiap item"}}
@@ -1016,8 +1040,8 @@ storage/PDF di mana pun pada endpoint ini.
 {
   "id": "...", "transaction_code": "TRX-20260731-0001", "type": "SELL",
   "total_amount": 1500000, "total_weight": 10, "payment_method": "CASH", "status": "COMPLETED",
-  "items": [{ "id": "...", "stock_item_id": "...", "barcode": "...", "product_name": "...",
-              "weight_gram": 10, "price_per_gram": 150000, "price_total": 1500000 }],
+  "items": [{ "id": "...", "stock_item_id": "...", "barcode": "...", "serial_number": "...",
+              "product_name": "...", "weight_gram": 10, "price_per_gram": 150000, "price_total": 1500000 }],
   "customer": { "name": "Budi Santoso", "phone": "0811111111", "address": "Jl. Mawar No. 2" },
   "supplier": null,
   "store": { "name": "Toko Emas Sejahtera", "address": "Jl. Testing No. 1, Jakarta", "phone": "021-1234567" },
@@ -1047,7 +1071,7 @@ storage/PDF di mana pun pada endpoint ini.
 POST /api/purchase-orders            # { supplier_id, notes?, items[]:{product_id,quantity,purchase_price} } -> 201
 GET  /api/purchase-orders            # ?status=&page=&limit=                                                  -> 200
 GET  /api/purchase-orders/{id}       # header + items                                                          -> 200 / 404
-POST /api/purchase-orders/{id}/receive  # { items[]:{product_id,serials[],condition} }                         -> 200 / 404 / 409
+POST /api/purchase-orders/{id}/receive  # { items[]:{product_id,serials[]:{serial_number,condition}} }         -> 200 / 404 / 409
 POST /api/purchase-orders/{id}/cancel   # tanpa body                                                            -> 200 / 404 / 409
 ```
 
@@ -1064,34 +1088,41 @@ sama dengan `sku`/`barcode`/`transaction_code` (hitung + insert 1 transaksi DB, 
 `POST /{id}/receive` adalah titik barang beneran jadi stok: **satu kali tembak, harus mencakup
 semua produk di PO itu** — request `items[]` wajib punya persis produk yang sama dengan item-item
 PO, dan `len(serials)` tiap produk harus **persis sama** dengan `quantity` PO-nya (kurang maupun
-lebih sama-sama ditolak 400, bukan cuma kasus kurang). Untuk tiap serial: satu `stock_items` baru
-(`status=AVAILABLE`, `barcode` auto-generate pola `{SKU}-{urut 4 digit}` sama seperti
-BE-501/BE-801, `purchase_price` diambil dari PO — **bukan** dari request receive,
-`po_id`/`supplier_id` ikut terisi di unit itu — pertama kalinya kedua kolom ini kepakai, sebelumnya
-selalu `NULL` baik dari create-stock-item langsung (BE-501) maupun buyback (BE-801)). Semuanya
-atomik dalam satu transaksi DB, PO row di-lock (`FOR UPDATE`) selama itu supaya PO yang sama tidak
-bisa diterima dua kali secara konkuren; setelah semua unit masuk, PO jadi `status=DITERIMA` +
-`received_at` terisi. PO yang sudah `DITERIMA`/`DIBATALKAN` tidak bisa di-receive lagi → 409.
+lebih sama-sama ditolak 400, bukan cuma kasus kurang). **`condition` per serial, bukan per
+item** — tiap objek di `serials[]` punya `serial_number` **dan** `condition` sendiri-sendiri
+(`{"serial_number": "...", "condition": "GOOD"}`), karena satu shipment/PO tidak dijamin semua
+unitnya seragam kondisinya (bisa campur `GOOD`/`BAD` dalam satu produk yang sama). Untuk tiap
+serial: satu `stock_items` baru (`status=AVAILABLE`, `barcode` auto-generate pola
+`{SKU}-{urut 4 digit}` sama seperti BE-501/BE-801, `purchase_price` diambil dari PO — **bukan**
+dari request receive, `po_id`/`supplier_id` ikut terisi di unit itu — pertama kalinya kedua kolom
+ini kepakai, sebelumnya selalu `NULL` baik dari create-stock-item langsung (BE-501) maupun
+buyback (BE-801)). Semuanya atomik dalam satu transaksi DB, PO row di-lock (`FOR UPDATE`) selama
+itu supaya PO yang sama tidak bisa diterima dua kali secara konkuren; setelah semua unit masuk,
+PO jadi `status=DITERIMA` + `received_at` terisi. PO yang sudah `DITERIMA`/`DIBATALKAN` tidak
+bisa di-receive lagi → 409.
 
 `POST /{id}/cancel` cuma bisa dari `status=BELUM_DITERIMA` → `DIBATALKAN` (guard di level SQL,
 pola yang sama dengan hard-delete `stock_items` di BE-504); PO yang sudah `DITERIMA` atau
 `DIBATALKAN` → 409.
 
 **Validasi**: field item `POST` (`product_id`/`quantity`/`purchase_price`) pakai tier `400` (di
-titik ini belum ada `stock_items` yang dibuat, jadi bukan tier validasi "unit fisik"). Field item
-`receive` (`serial_number`/`condition`) pakai tier `422`, sama seperti BE-501/BE-801 — langkah ini
-memang bikin `stock_items` baru. `serial_number` duplikat (lawan unit yang sudah ada, atau sesama
-item dalam satu batch receive) → `409`, pakai constraint & sentinel yang sama dengan BE-801
-(`uq_stock_items_serial_number`). Produk harus aktif buat `POST` maupun `receive` (400 kalau
-diarsipkan, pesan sama dengan BE-501); tidak ada pengecekan aktif buat supplier (konsisten dengan
-`SELL_SUPPLIER` di BE-702 yang juga tidak mengeceknya).
+titik ini belum ada `stock_items` yang dibuat, jadi bukan tier validasi "unit fisik"). Field
+serial `receive` (`serial_number`/`condition`, masing-masing dicek per objek di `serials[]`)
+pakai tier `422`, sama seperti BE-501/BE-801 — langkah ini memang bikin `stock_items` baru.
+`serial_number` duplikat (lawan unit yang sudah ada, atau sesama item dalam satu batch receive)
+→ `409`, pakai constraint & sentinel yang sama dengan BE-801 (`uq_stock_items_serial_number`).
+Produk harus aktif buat `POST` maupun `receive` (400 kalau diarsipkan, pesan sama dengan BE-501);
+tidak ada pengecekan aktif buat supplier (konsisten dengan `SELL_SUPPLIER` di BE-702 yang juga
+tidak mengeceknya).
 
 Response `GET /` (list) cuma header (tanpa `items[]`); `GET /{id}` dan `POST` sertakan `items[]`
 (dengan nama & SKU produk, di-join langsung — `purchase_order_items` tidak punya kolom snapshot
 nama produk seperti `transaction_items`, jadi live join memang satu-satunya cara). Response
-`receive` juga sertakan `received_units[]` (`stock_item_id`/`barcode`/`product_name`/`serial_number`
-per unit baru) — biar admin yang baru nerima PO langsung punya barcode buat cetak label, sama
-alasannya dengan `stock_item_id`/`barcode` di tiap item transaksi (BE-702/BE-801).
+`receive` juga sertakan `received_units[]`
+(`stock_item_id`/`barcode`/`product_name`/`serial_number`/`condition` per unit baru — `condition`
+di sini persis kondisi yang diinput per serial di request, bukan disamaratakan) — biar admin yang
+baru nerima PO langsung punya barcode buat cetak label, sama alasannya dengan
+`stock_item_id`/`barcode` di tiap item transaksi (BE-702/BE-801).
 
 Contoh response `POST /api/purchase-orders` (201):
 ```json
@@ -1118,8 +1149,24 @@ Contoh response `POST /api/purchase-orders` (201):
 }
 ```
 
+Contoh request `POST /api/purchase-orders/{id}/receive` — dua unit produk yang sama, kondisi
+berbeda (`GOOD` & `BAD`):
+```json
+{
+  "items": [
+    {
+      "product_id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f",
+      "serials": [
+        { "serial_number": "PO-SN-1", "condition": "GOOD" },
+        { "serial_number": "PO-SN-2", "condition": "BAD" }
+      ]
+    }
+  ]
+}
+```
+
 Contoh response `POST /api/purchase-orders/{id}/receive` (200) — `status`/`received_at` berubah,
-`received_units[]` muncul:
+`received_units[]` muncul, `condition` per unit mengikuti request (bukan disamaratakan):
 ```json
 {
   "success": true,
@@ -1136,7 +1183,15 @@ Contoh response `POST /api/purchase-orders/{id}/receive` (200) — `status`/`rec
         "stock_item_id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
         "barcode": "BAT-ANT-10-001-0001",
         "product_name": "Emas Batangan 10gr",
-        "serial_number": "PO-SN-1"
+        "serial_number": "PO-SN-1",
+        "condition": "GOOD"
+      },
+      {
+        "stock_item_id": "2b3c4d5e-6f70-8901-bcde-f01234567890",
+        "barcode": "BAT-ANT-10-001-0002",
+        "product_name": "Emas Batangan 10gr",
+        "serial_number": "PO-SN-2",
+        "condition": "BAD"
       }
     ],
     "created_at": "2026-07-31T09:00:00Z",
@@ -1829,6 +1884,13 @@ lengkap API surface, bukan cuma cover apa yang ada waktu ditulis (lihat komentar
 
 Lihat `.env.example` untuk daftar lengkap. Semua diambil dari environment
 variable; file `.env` otomatis dibaca saat development (lihat `internal/config`).
+
+`CORS_ALLOWED_ORIGINS` — daftar origin yang boleh akses API dari browser, dipisah koma
+(default `*` kalau tidak diisi). Middleware-nya (`internal/middleware/cors.go`, pakai
+`github.com/go-chi/cors`) sengaja tidak mengaktifkan `AllowCredentials` — auth di API ini
+pakai Bearer token di header `Authorization`, bukan cookie, jadi wildcard origin aman dipakai
+di local/dev. Untuk staging/production, isi dengan domain frontend asli (mis.
+`https://app.goldtrack.id`) supaya lebih ketat.
 
 ## Menambah fitur baru
 
