@@ -1523,6 +1523,50 @@ Contoh response `GET /api/reports/dashboard` (200):
 }
 ```
 
+### /api/settings — pengaturan toko (ADMIN & SUPER_ADMIN)
+
+```bash
+GET /api/settings   # list shop_name, shop_address, shop_phone            -> 200
+PUT /api/settings   # { shop_name?, shop_address?, shop_phone? }          -> 200 / 400
+```
+
+Key-value store (tabel `settings`, migrasi `000013`) — dipakai buat data toko yang tampil di
+struk transaksi (`GET /api/transactions/{id}/receipt`, lihat `transactionService.GetReceipt`).
+Endpoint ini **hanya mengekspos 3 key yang sudah di-seed** (`cmd/seed`): `shop_name`,
+`shop_address`, `shop_phone`. Beda dari resource CRUD lain, `PUT` **tidak bisa bikin key baru** —
+kalau key belum ada baris di tabel (mis. seeder belum jalan), update dibalas `500` (bukan 404,
+karena dari sisi API key ini seharusnya selalu sudah ada).
+
+Semua field di body `PUT` **opsional** (pakai pointer di Go) — kirim cuma `shop_phone` misalnya,
+`shop_name`/`shop_address` tidak ikut berubah. Field yang dikirim tidak boleh string kosong
+(`400`). Minimal satu field harus diisi, body kosong ditolak `400`. `updated_by` diambil otomatis
+dari user yang login (JWT claims), bukan dari body request.
+
+Contoh response `GET /api/settings` (200):
+```json
+{
+  "success": true,
+  "data": [
+    { "key": "shop_address", "value": "Jl. Contoh No. 1, Jakarta", "description": "Alamat toko untuk struk", "updated_at": "2026-08-01T09:00:00Z" },
+    { "key": "shop_name", "value": "Gold Track Store", "description": "Nama toko untuk struk & laporan", "updated_at": "2026-08-01T09:00:00Z" },
+    { "key": "shop_phone", "value": "0800-0000-0000", "description": "Nomor telepon toko untuk struk", "updated_at": "2026-08-01T09:00:00Z" }
+  ]
+}
+```
+
+Contoh response error:
+```json
+// 400 — body kosong / semua field null
+{"success":false,"error":{"code":"BAD_REQUEST","message":"minimal satu field harus diisi"}}
+
+// 400 — field dikirim tapi string kosong
+{"success":false,"error":{"code":"BAD_REQUEST","message":"shop_phone tidak boleh kosong"}}
+```
+
+Nambah key settings baru (di luar 3 yang ada) perlu dua langkah manual: insert baris lewat
+`cmd/seed` (atau migrasi baru), lalu tambahkan key-nya ke `shopSettingKeys` di
+`internal/service/settings_service.go` — repository dan handler tidak perlu diubah.
+
 ## Middleware JWT & role (internal/middleware/auth.go)
 
 - `appmw.JWTAuth(authService)` — verifikasi Bearer token (signature, expiry, dan status

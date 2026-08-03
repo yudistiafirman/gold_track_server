@@ -66,6 +66,8 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	customerHandler := handler.NewCustomerHandler(customerService)
 
 	settingsRepo := repository.NewSettingsRepository(dbPool)
+	settingsService := service.NewSettingsService(settingsRepo, userRepo)
+	settingsHandler := handler.NewSettingsHandler(settingsService)
 
 	transactionRepo := repository.NewTransactionRepository(dbPool)
 	transactionService := service.NewTransactionService(transactionRepo, stockItemRepo, productRepo, customerRepo, supplierRepo, userRepo, settingsRepo)
@@ -91,7 +93,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	reportService := service.NewReportService(reportRepo)
 	reportHandler := handler.NewReportHandler(reportService)
 
-	router := handler.NewRouter(log, cfg.CORS, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler, transactionHandler, purchaseOrderHandler, stockOpnameHandler, expenseCategoryHandler, expenseHandler, reportHandler)
+	router := handler.NewRouter(log, cfg.CORS, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler, transactionHandler, purchaseOrderHandler, stockOpnameHandler, expenseCategoryHandler, expenseHandler, reportHandler, settingsHandler)
 
 	return &App{Pool: dbPool, Router: router}, nil
 }
