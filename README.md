@@ -77,7 +77,9 @@ belum punya, beda dari resource lain yang dari awal sudah punya). `000021` meng-
 `barcode`/`public_id` yang unik di tabel itu. `000022` meng-ALTER `suppliers`/`customers`
 supaya kolom `phone` jadi `NOT NULL` (sebelumnya nullable/opsional). `000023` meng-ALTER
 CHECK constraint `payment_method` di `transactions` supaya terima metode baru (lihat
-`### /api/transactions` di bawah), bukan cuma `CASH`/`TRANSFER`/`QRIS`.
+`### /api/transactions` di bawah), bukan cuma `CASH`/`TRANSFER`/`QRIS`. `000024` meng-ALTER
+`gold_prices` supaya `created_by` jadi nullable (BE-404, lihat `### /api/gold-prices/active` di
+bawah) — baris hasil sync otomatis tidak punya actor manusia.
 
 Menambah migrasi baru: buat pasangan file
 `migrations/{next_number}_{deskripsi}.up.sql` dan `.down.sql`.
@@ -1567,6 +1569,74 @@ Nambah key settings baru (di luar 3 yang ada) perlu dua langkah manual: insert b
 `cmd/seed` (atau migrasi baru), lalu tambahkan key-nya ke `shopSettingKeys` di
 `internal/service/settings_service.go` — repository dan handler tidak perlu diubah.
 
+### /api/gold-prices/active — harga emas rujukan (BE-404, semua role login)
+
+```bash
+GET /api/gold-prices/active   # read-only, tidak fetch on-demand           -> 200
+```
+
+Beda dari resource lain di backend ini: **bukan dipicu request user**. Sebuah goroutine di
+`cmd/api/main.go` (`runGoldPriceSync`, pakai `time.Ticker`) fetch harga dari API pihak ketiga
+([`logam-mulia-api.iamutaki.workers.dev`](https://logam-mulia-api.iamutaki.workers.dev)) tiap
+interval (env `GOLD_PRICE_SYNC_INTERVAL`, default `1h`), sekali langsung saat startup lalu
+berulang. Endpoint ini **cuma baca baris terakhir yang berhasil di-sync dari DB** — response time
+tidak pernah bergantung ke API eksternal, dan tetap bisa dijawab walau API itu sedang down.
+
+Sengaja ditaruh di `cmd/api/main.go`, **bukan** di `internal/app/app.go` — `app.New` juga dipanggil
+oleh e2e test harness (`test/e2e`), jadi kalau goroutine sync-nya ditaruh di situ, tiap test run
+bakal ikut manggil API eksternal beneran. `GoldPriceService` di-expose lewat `App` struct supaya
+`main.go` yang menjalankan goroutine-nya sendiri.
+
+Source yang dipakai: feed `anekalogam` (bukan `pegadaian` dkk — cuma feed ini yang punya harga
+emas batangan Antam asli, bukan pecahan gram kecil), difilter ke entry dengan
+`weight=1` **dan** `materialType="LM Antam produksi tahun 2026"` — sengaja bukan entry lain yang
+juga kebetulan 1gr (`"...Certicard gramasi 100 gram..."`, materialType-nya cuma muncul di 1gr,
+tidak konsisten di berat lain, jadi tidak dipakai). Kalau API eksternal ubah bentuk response atau
+source ini hilang, sync gagal (fallback di bawah) sampai ada perubahan kode.
+
+**Insert atomik**: satu transaksi DB men-nonaktifkan baris `is_active=true` yang lama
+(`effective_until=now()`) lalu insert baris baru `is_active=true` — tidak pernah 0 atau lebih dari
+1 baris aktif (`GoldPriceRepository.ReplaceActive`).
+
+**Fallback kalau fetch gagal/timeout** (5 detik, API eksternal ini "hobby project" tanpa SLA):
+baris aktif yang ada **tidak disentuh sama sekali**, error di-log di server (`gold price sync
+failed`), lanjut ke tick berikutnya — tidak pernah bikin endpoint baca ini 5xx gara-gara API
+eksternal down.
+
+`created_by` di `gold_prices` (migrasi `000006`) awalnya `NOT NULL` — diubah jadi nullable di
+migrasi `000024` khusus buat baris hasil sync ini (`NULL` = "diisi sistem otomatis", bukan pura-pura
+pakai user id tertentu). Baris yang dibuat manual (kalau nanti ada endpoint override) tetap wajib
+isi `created_by`.
+
+Kalau belum pernah ada sync sukses (fresh deploy, goroutine belum sempat jalan), response tetap
+`200` dengan `data: null` — **bukan** `404`/`500` — supaya FE tinggal sembunyikan widget-nya kalau
+null. Field ini dikirim eksplisit sebagai `null` (bukan field yang di-omit), beda dari envelope
+default `pkg/response` yang pakai `omitempty` — lihat `goldPriceEnvelope` di
+`internal/handler/gold_price_handler.go`.
+
+Harga di sini **murni referensi/tampilan** — tidak dipakai sebagai default value di form input
+harga manual transaksi (`BE-702`/`BE-801`), dan tidak ada endpoint `POST`/`PUT` manual di scope
+ticket ini.
+
+Contoh response (200, ada data):
+```json
+{
+  "success": true,
+  "data": {
+    "source": "logam-mulia-api:anekalogam",
+    "price_buy": 2525000,
+    "price_sell": 2605000,
+    "price_reference": 2605000,
+    "fetched_at": "2026-08-04T01:13:27.116436+07:00"
+  }
+}
+```
+
+Contoh response (200, belum pernah sync):
+```json
+{"success": true, "data": null}
+```
+
 ## Middleware JWT & role (internal/middleware/auth.go)
 
 - `appmw.JWTAuth(authService)` — verifikasi Bearer token (signature, expiry, dan status
@@ -1935,6 +2005,11 @@ variable; file `.env` otomatis dibaca saat development (lihat `internal/config`)
 pakai Bearer token di header `Authorization`, bukan cookie, jadi wildcard origin aman dipakai
 di local/dev. Untuk staging/production, isi dengan domain frontend asli (mis.
 `https://app.goldtrack.id`) supaya lebih ketat.
+
+`GOLD_PRICE_SYNC_INTERVAL` — interval sinkronisasi harga emas rujukan (BE-404, lihat
+`### /api/gold-prices/active` di atas), format `time.ParseDuration` Go (mis. `1h`, `30m`).
+Default `1h` kalau tidak diisi atau tidak valid. Goroutine sync dijalankan dari `cmd/api/main.go`,
+sekali langsung saat startup lalu berulang tiap interval ini.
 
 ## Menambah fitur baru
 

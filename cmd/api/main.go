@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"gold-track-be/internal/app"
 	"gold-track-be/internal/config"
 	"gold-track-be/internal/logger"
+	"gold-track-be/internal/service"
 )
 
 func main() {
@@ -49,6 +51,8 @@ func main() {
 		}
 	}()
 
+	go runGoldPriceSync(ctx, application.GoldPriceService, cfg.GoldPrice.SyncInterval, log)
+
 	<-ctx.Done()
 	log.Info("shutdown signal received")
 
@@ -61,4 +65,28 @@ func main() {
 	}
 
 	log.Info("server stopped gracefully")
+}
+
+// runGoldPriceSync drives BE-404: syncs once immediately, then again every
+// interval until ctx is cancelled. A failed sync just logs and waits for
+// the next tick — the active gold_prices row is left untouched, so reads
+// keep serving the last good value (see GoldPriceService.SyncOnce).
+func runGoldPriceSync(ctx context.Context, svc service.GoldPriceService, interval time.Duration, log *slog.Logger) {
+	if err := svc.SyncOnce(ctx); err != nil {
+		log.Error("gold price sync failed", "error", err)
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := svc.SyncOnce(ctx); err != nil {
+				log.Error("gold price sync failed", "error", err)
+			}
+		}
+	}
 }

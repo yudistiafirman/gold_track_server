@@ -39,6 +39,7 @@ func NewRouter(
 	expenseHandler *ExpenseHandler,
 	reportHandler *ReportHandler,
 	settingsHandler *SettingsHandler,
+	goldPriceHandler *GoldPriceHandler,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -66,6 +67,7 @@ func NewRouter(
 			r.Post("/transactions", transactionHandler.Create)
 			r.Get("/transactions/{id}", transactionHandler.Get)
 			r.Get("/transactions/{id}/receipt", transactionHandler.GetReceipt)
+			r.Get("/gold-prices/active", goldPriceHandler.GetActive)
 			r.Route("/customers", func(r chi.Router) {
 				r.Get("/", customerHandler.List)
 				r.Post("/", customerHandler.Create)

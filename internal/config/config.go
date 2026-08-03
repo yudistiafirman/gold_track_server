@@ -17,10 +17,11 @@ const devJWTSecret = "dev-secret-change-me"
 
 // Config holds all configuration for the application, sourced from environment variables.
 type Config struct {
-	App      AppConfig
-	Database DatabaseConfig
-	JWT      JWTConfig
-	CORS     CORSConfig
+	App       AppConfig
+	Database  DatabaseConfig
+	JWT       JWTConfig
+	CORS      CORSConfig
+	GoldPrice GoldPriceConfig
 }
 
 type AppConfig struct {
@@ -48,6 +49,12 @@ type JWTConfig struct {
 
 type CORSConfig struct {
 	AllowedOrigins []string
+}
+
+// GoldPriceConfig drives the BE-404 background sync (cmd/api/main.go),
+// not the HTTP handler — it never reads env vars itself.
+type GoldPriceConfig struct {
+	SyncInterval time.Duration
 }
 
 // DSN builds a PostgreSQL connection string from the database config.
@@ -113,6 +120,9 @@ func Load() (*Config, error) {
 		},
 		CORS: CORSConfig{
 			AllowedOrigins: getEnvList("CORS_ALLOWED_ORIGINS", []string{"*"}),
+		},
+		GoldPrice: GoldPriceConfig{
+			SyncInterval: getEnvDuration("GOLD_PRICE_SYNC_INTERVAL", time.Hour),
 		},
 	}
 

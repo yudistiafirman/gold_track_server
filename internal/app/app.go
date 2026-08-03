@@ -21,6 +21,10 @@ import (
 type App struct {
 	Pool   *pgxpool.Pool
 	Router http.Handler
+	// GoldPriceService is exposed so cmd/api can drive the BE-404 background
+	// sync goroutine itself — kept out of New() so the e2e test harness
+	// (which also calls New()) never fires real external HTTP calls.
+	GoldPriceService service.GoldPriceService
 }
 
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error) {
@@ -93,7 +97,11 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	reportService := service.NewReportService(reportRepo)
 	reportHandler := handler.NewReportHandler(reportService)
 
-	router := handler.NewRouter(log, cfg.CORS, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler, transactionHandler, purchaseOrderHandler, stockOpnameHandler, expenseCategoryHandler, expenseHandler, reportHandler, settingsHandler)
+	goldPriceRepo := repository.NewGoldPriceRepository(dbPool)
+	goldPriceService := service.NewGoldPriceService(goldPriceRepo)
+	goldPriceHandler := handler.NewGoldPriceHandler(goldPriceService)
 
-	return &App{Pool: dbPool, Router: router}, nil
+	router := handler.NewRouter(log, cfg.CORS, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler, transactionHandler, purchaseOrderHandler, stockOpnameHandler, expenseCategoryHandler, expenseHandler, reportHandler, settingsHandler, goldPriceHandler)
+
+	return &App{Pool: dbPool, Router: router, GoldPriceService: goldPriceService}, nil
 }
