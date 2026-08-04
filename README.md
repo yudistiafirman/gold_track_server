@@ -81,7 +81,9 @@ CHECK constraint `payment_method` di `transactions` supaya terima metode baru (l
 `gold_prices` supaya `created_by` jadi nullable (BE-404, lihat `### /api/gold-prices/active` di
 bawah) — baris hasil sync otomatis tidak punya actor manusia. `000025` meng-ALTER `stock_items`
 nambah kolom `production_year` (nullable) — atribut opsional per unit fisik, lihat
-`### /api/products/{productId}/stock-items & /api/stock-items` di bawah.
+`### /api/products/{productId}/stock-items & /api/stock-items` di bawah. `000026` nambah partial
+unique index di `stock_opnames` supaya cuma boleh ada 1 sesi `status='IN_PROGRESS'` dalam satu
+waktu, lihat `### /api/stock-opnames` di bawah.
 
 Menambah migrasi baru: buat pasangan file
 `migrations/{next_number}_{deskripsi}.up.sql` dan `.down.sql`.
@@ -1280,19 +1282,39 @@ Contoh response error:
 ### /api/stock-opnames — stock opname / cocok stok fisik (BE-1101/BE-1102/BE-1103, ADMIN & SUPER_ADMIN)
 
 ```bash
-POST /api/stock-opnames               # { notes? }                    -> 201
+GET  /api/stock-opnames               # ?status=&page=&limit=          -> 200
+POST /api/stock-opnames               # { notes? }                    -> 201 / 409
 GET  /api/stock-opnames/{id}          # detail + items[] + summary     -> 200 / 404
 POST /api/stock-opnames/{id}/scan     # { barcode }                    -> 200 / 404 / 409
 POST /api/stock-opnames/{id}/complete # tanpa body                     -> 200 / 404 / 409
 ```
 
 Sama seperti `/api/purchase-orders`: **cuma** `ADMIN`/`SUPER_ADMIN`, tidak ada akses `KASIR` —
-semua tiga ticket-nya eksplisit "Sebagai Admin". Tidak ada `GET /api/stock-opnames` (list) — belum
-diminta ticket manapun di batch ini.
+semua ticket-nya eksplisit "Sebagai Admin".
 
 **Alur**: `POST` bikin sesi baru `status=IN_PROGRESS`, `opname_code` format `OPN-YYYYMMDD-XXXX`
 (pola generate yang sama dengan `sku`/`barcode`/`transaction_code`/`po_code`), `opname_date` diisi
 `CURRENT_DATE` di level DB (bukan input klien).
+
+**Cuma boleh ada 1 sesi `IN_PROGRESS` dalam satu waktu** — `POST` ditolak `409` kalau masih ada
+sesi lain yang belum di-`complete`. Guard-nya di level DB (partial unique index
+`uq_stock_opnames_single_in_progress` di kolom `status` `WHERE status = 'IN_PROGRESS'`, migrasi
+`000026`), bukan cek-lalu-insert di aplikasi — jadi dua request `POST` konkuren nggak bisa
+sama-sama lolos bikin 2 sesi `IN_PROGRESS`. Sesi yang `IN_PROGRESS` **bisa dilanjutkan** kapan saja
+lewat `POST /{id}/scan` (belum ada "resume" khusus — tinggal lanjut scan ke sesi yang sama, itu
+sebabnya sesi `IN_PROGRESS` juga muncul di `GET /api/stock-opnames` list, bukan cuma yang
+`COMPLETED`, supaya sesi yang ketinggalan gampang ditemukan lagi dari UI).
+
+#### GET /api/stock-opnames — daftar sesi, header-only
+
+Sama pola dengan `GET /api/purchase-orders`: list `items[]` **header-only** — tiap baris nggak
+bawa daftar unit yang discan (field `items` di-omit, sama kayak PO list), dan `summary` selalu
+`{match:0, missing:0, unexpected:0}` (dihitung dari items yang memang tidak di-fetch buat list,
+bukan `summary` sesi yang sebenarnya) — buat hitungan asli, fetch `GET /{id}`. Urut `id DESC`
+(terbaru duluan), paginated (`?page=`/`?limit=`, default `1`/`20`, `limit` di-cap `100`). `?status=`
+opsional — kalau diisi harus `IN_PROGRESS`, `COMPLETED`, atau `CANCELLED` (400 kalau bukan;
+`CANCELLED` ada di `CHECK` constraint DB tapi belum ada endpoint yang men-set status itu, jadi
+filter ini akan selalu balik list kosong sampai ada fitur cancel opname).
 
 `POST /{id}/scan` mencatat satu kali scan barcode fisik ke `stock_opname_items`:
 - Barcode dikenal & `stock_items.status=AVAILABLE` → `system_status=AVAILABLE`,
@@ -1325,6 +1347,27 @@ dengan complete yang konkuren.
 (`{match, missing, unexpected}`, dihitung dari `items[]` yang sudah di-fetch, bukan query terpisah)
 dan `items[]` (barcode/nama produk di-join dari `stock_items`/`products`, sama pola "list/detail
 sertakan nama, bukan FK mentah" seperti `StockItemWithRefs`/`PurchaseOrderWithSupplier`).
+
+Contoh response `GET /api/stock-opnames?status=IN_PROGRESS` (200) — header-only, `summary` selalu nol:
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "7a8b9c0d-1e2f-3456-7890-abcdef123456",
+        "opname_code": "OPN-20260731-0002",
+        "opname_date": "2026-07-31",
+        "status": "IN_PROGRESS",
+        "notes": "",
+        "summary": { "match": 0, "missing": 0, "unexpected": 0 },
+        "created_at": "2026-07-31T10:00:00Z"
+      }
+    ],
+    "pagination": { "page": 1, "limit": 20, "total": 1, "total_pages": 1 }
+  }
+}
+```
 
 Contoh response `POST /api/stock-opnames/{id}/complete` (200):
 ```json
@@ -1372,6 +1415,12 @@ Contoh response error:
 
 // 409 — scan/complete terhadap sesi yang sudah COMPLETED
 {"success":false,"error":{"code":"CONFLICT","message":"sesi opname sudah selesai, tidak bisa discan lagi"}}
+
+// 409 — POST create, masih ada sesi lain yang IN_PROGRESS
+{"success":false,"error":{"code":"CONFLICT","message":"masih ada sesi opname yang belum selesai (IN_PROGRESS), selesaikan atau lanjutkan sesi itu dulu sebelum membuat sesi baru"}}
+
+// 400 — GET list, ?status= bukan IN_PROGRESS/COMPLETED/CANCELLED
+{"success":false,"error":{"code":"BAD_REQUEST","message":"status harus IN_PROGRESS, COMPLETED, atau CANCELLED"}}
 ```
 
 ### /api/expense-categories & /api/expenses — pengeluaran operasional (BE-1201/BE-1202, ADMIN & SUPER_ADMIN)

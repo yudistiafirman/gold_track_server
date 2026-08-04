@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	appmw "gold-track-be/internal/middleware"
@@ -81,6 +82,11 @@ func toStockOpnameResponse(o service.StockOpnameSummary) stockOpnameResponse {
 	}
 }
 
+type stockOpnameListResponse struct {
+	Items      []stockOpnameResponse `json:"items"`
+	Pagination paginationResponse    `json:"pagination"`
+}
+
 type createStockOpnameRequest struct {
 	Notes string `json:"notes"`
 }
@@ -108,6 +114,40 @@ func (h *StockOpnameHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.JSON(w, http.StatusCreated, toStockOpnameResponse(result))
+}
+
+// List returns opname sessions header-only (no items[]/summary per row,
+// same as purchase order list rows) — fetch Get for a session's full
+// detail, including whether it's IN_PROGRESS and resumable via Scan.
+func (h *StockOpnameHandler) List(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+
+	result, err := h.stockOpnameService.List(r.Context(), service.ListStockOpnameInput{
+		Status: q.Get("status"),
+		Page:   page,
+		Limit:  limit,
+	})
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	items := make([]stockOpnameResponse, 0, len(result.Items))
+	for _, o := range result.Items {
+		items = append(items, toStockOpnameResponse(o))
+	}
+
+	response.JSON(w, http.StatusOK, stockOpnameListResponse{
+		Items: items,
+		Pagination: paginationResponse{
+			Page:       result.Page,
+			Limit:      result.Limit,
+			Total:      result.Total,
+			TotalPages: result.TotalPages,
+		},
+	})
 }
 
 func (h *StockOpnameHandler) Get(w http.ResponseWriter, r *http.Request) {

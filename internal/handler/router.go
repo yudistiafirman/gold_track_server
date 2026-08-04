@@ -126,6 +126,7 @@ func NewRouter(
 					r.Post("/{id}/cancel", purchaseOrderHandler.Cancel)
 				})
 				r.Route("/stock-opnames", func(r chi.Router) {
+					r.Get("/", stockOpnameHandler.List)
 					r.Post("/", stockOpnameHandler.Create)
 					r.Get("/{id}", stockOpnameHandler.Get)
 					r.Post("/{id}/scan", stockOpnameHandler.Scan)

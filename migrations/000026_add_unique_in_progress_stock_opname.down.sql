@@ -1,0 +1,1 @@
+DROP INDEX uq_stock_opnames_single_in_progress;

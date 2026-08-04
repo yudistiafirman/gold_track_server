@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
 	"time"
 
 	"gold-track-be/internal/model"
@@ -11,6 +12,18 @@ import (
 )
 
 const stockOpnameDateLayout = "2006-01-02"
+
+const (
+	defaultStockOpnamePage  = 1
+	defaultStockOpnameLimit = 20
+	maxStockOpnameLimit     = 100
+)
+
+var allowedStockOpnameStatuses = map[string]struct{}{
+	"IN_PROGRESS": {},
+	"COMPLETED":   {},
+	"CANCELLED":   {},
+}
 
 type StockOpnameItemSummary struct {
 	PublicID          string
@@ -47,8 +60,26 @@ type CreateStockOpnameInput struct {
 	CreatedByPublicID string
 }
 
+type ListStockOpnameInput struct {
+	Status string
+	Page   int
+	Limit  int
+}
+
+// StockOpnameListResult rows are header-only (Items left nil, Summary left
+// zero) — same pattern as PurchaseOrderListResult's list rows. Fetch
+// GET /api/stock-opnames/{id} for a session's full detail.
+type StockOpnameListResult struct {
+	Items      []StockOpnameSummary
+	Page       int
+	Limit      int
+	Total      int
+	TotalPages int
+}
+
 type StockOpnameService interface {
 	Create(ctx context.Context, input CreateStockOpnameInput) (StockOpnameSummary, error)
+	List(ctx context.Context, input ListStockOpnameInput) (StockOpnameListResult, error)
 	Get(ctx context.Context, publicID string) (StockOpnameSummary, error)
 	Scan(ctx context.Context, opnamePublicID, barcode string) (StockOpnameItemSummary, error)
 	Complete(ctx context.Context, publicID string) (StockOpnameSummary, error)
@@ -80,13 +111,58 @@ func (s *stockOpnameService) Create(ctx context.Context, input CreateStockOpname
 		CreatedBy: creator.ID,
 	})
 	if err != nil {
-		if errors.Is(err, repository.ErrOpnameCodeGenerationFailed) {
+		switch {
+		case errors.Is(err, repository.ErrStockOpnameAlreadyInProgress):
+			return StockOpnameSummary{}, apperror.Conflict("masih ada sesi opname yang belum selesai (IN_PROGRESS), selesaikan atau lanjutkan sesi itu dulu sebelum membuat sesi baru", nil)
+		case errors.Is(err, repository.ErrOpnameCodeGenerationFailed):
 			return StockOpnameSummary{}, apperror.Conflict("gagal membuat kode opname unik, coba lagi", nil)
+		default:
+			return StockOpnameSummary{}, apperror.Internal("failed to create stock opname", err)
 		}
-		return StockOpnameSummary{}, apperror.Internal("failed to create stock opname", err)
 	}
 
 	return toStockOpnameSummary(opname, nil), nil
+}
+
+func (s *stockOpnameService) List(ctx context.Context, input ListStockOpnameInput) (StockOpnameListResult, error) {
+	page := input.Page
+	if page <= 0 {
+		page = defaultStockOpnamePage
+	}
+	limit := input.Limit
+	if limit <= 0 {
+		limit = defaultStockOpnameLimit
+	}
+	if limit > maxStockOpnameLimit {
+		limit = maxStockOpnameLimit
+	}
+
+	filter := repository.StockOpnameFilter{Page: page, Limit: limit}
+	if input.Status != "" {
+		if _, ok := allowedStockOpnameStatuses[input.Status]; !ok {
+			return StockOpnameListResult{}, apperror.BadRequest("status harus IN_PROGRESS, COMPLETED, atau CANCELLED", nil)
+		}
+		status := input.Status
+		filter.Status = &status
+	}
+
+	opnames, total, err := s.stockOpnameRepo.List(ctx, filter)
+	if err != nil {
+		return StockOpnameListResult{}, apperror.Internal("failed to list stock opnames", err)
+	}
+
+	items := make([]StockOpnameSummary, 0, len(opnames))
+	for i := range opnames {
+		items = append(items, toStockOpnameSummary(&opnames[i], nil))
+	}
+
+	return StockOpnameListResult{
+		Items:      items,
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: int(math.Ceil(float64(total) / float64(limit))),
+	}, nil
 }
 
 func (s *stockOpnameService) Get(ctx context.Context, publicID string) (StockOpnameSummary, error) {

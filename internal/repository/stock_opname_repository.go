@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,7 +33,17 @@ var ErrOpnameCodeConflict = errors.New("opname code conflict")
 // exhausts its retry budget without landing a unique opname_code.
 var ErrOpnameCodeGenerationFailed = errors.New("failed to generate a unique opname code")
 
+// ErrStockOpnameAlreadyInProgress is returned when Create is rejected
+// because another session is still IN_PROGRESS — guarded at the DB level by
+// uq_stock_opnames_single_in_progress (a partial unique index on status),
+// not a pre-check-then-insert, so a concurrent double-create can't slip two
+// IN_PROGRESS rows past each other.
+var ErrStockOpnameAlreadyInProgress = errors.New("another stock opname session is already in progress")
+
 const createOpnameMaxAttempts = 5
+
+const uqStockOpnamesOpnameCode = "uq_stock_opnames_opname_code"
+const uqStockOpnamesSingleInProgress = "uq_stock_opnames_single_in_progress"
 
 const stockOpnameColumns = `id, public_id::text, opname_code, opname_date, status, notes, created_by, created_at`
 
@@ -62,12 +73,22 @@ type CreateOpnameInput struct {
 	CreatedBy int64
 }
 
+type StockOpnameFilter struct {
+	Status *string // IN_PROGRESS | COMPLETED | CANCELLED, nil = no filter
+	Page   int
+	Limit  int
+}
+
 type StockOpnameRepository interface {
 	// CreateWithGeneratedCode counts existing opnames sharing the day's
 	// code prefix, inserts, retrying on a concurrent opname_code
 	// unique-violation race — same shape as purchase_order_repository.go's
-	// CreateWithGeneratedCode.
+	// CreateWithGeneratedCode. Rejects with ErrStockOpnameAlreadyInProgress
+	// (never retried) if another session is still IN_PROGRESS.
 	CreateWithGeneratedCode(ctx context.Context, input CreateOpnameInput) (*model.StockOpname, error)
+	// List returns opname sessions matching filter (header only, no items),
+	// newest first, along with the total count ignoring pagination.
+	List(ctx context.Context, filter StockOpnameFilter) ([]model.StockOpname, int, error)
 	FindByPublicID(ctx context.Context, publicID string) (*model.StockOpname, []StockOpnameItemWithStockRef, error)
 	// Scan locks the opname row (FOR UPDATE), verifies IN_PROGRESS, looks
 	// up the unit by barcode (ErrStockItemNotFound if no stock_items row
@@ -147,7 +168,10 @@ func (r *stockOpnameRepository) tryCreate(ctx context.Context, input CreateOpnam
 	err = tx.QueryRow(ctx, insertQuery, opname.OpnameCode, opname.Status, opname.Notes, opname.CreatedBy).
 		Scan(&opname.ID, &opname.PublicID, &opname.OpnameDate, &opname.CreatedAt)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if isUniqueViolationOnConstraint(err, uqStockOpnamesSingleInProgress) {
+			return nil, ErrStockOpnameAlreadyInProgress
+		}
+		if isUniqueViolationOnConstraint(err, uqStockOpnamesOpnameCode) || isUniqueViolation(err) {
 			return nil, ErrOpnameCodeConflict
 		}
 		return nil, fmt.Errorf("insert stock opname: %w", err)
@@ -157,6 +181,48 @@ func (r *stockOpnameRepository) tryCreate(ctx context.Context, input CreateOpnam
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 	return opname, nil
+}
+
+func (r *stockOpnameRepository) List(ctx context.Context, filter StockOpnameFilter) ([]model.StockOpname, int, error) {
+	conditions := []string{"1=1"}
+	var args []any
+
+	if filter.Status != nil {
+		args = append(args, *filter.Status)
+		conditions = append(conditions, fmt.Sprintf("status = $%d", len(args)))
+	}
+	where := "WHERE " + strings.Join(conditions, " AND ")
+
+	var total int
+	countQuery := `SELECT COUNT(*) FROM stock_opnames ` + where
+	if err := r.db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count stock opnames: %w", err)
+	}
+
+	limitArg := len(args) + 1
+	offsetArg := len(args) + 2
+	listArgs := append(append([]any{}, args...), filter.Limit, (filter.Page-1)*filter.Limit)
+	listQuery := `SELECT ` + stockOpnameColumns + ` FROM stock_opnames ` + where +
+		fmt.Sprintf(" ORDER BY id DESC LIMIT $%d OFFSET $%d", limitArg, offsetArg)
+
+	rows, err := r.db.Query(ctx, listQuery, listArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list stock opnames: %w", err)
+	}
+	defer rows.Close()
+
+	var opnames []model.StockOpname
+	for rows.Next() {
+		var o model.StockOpname
+		if err := scanStockOpname(rows, &o); err != nil {
+			return nil, 0, fmt.Errorf("scan stock opname row: %w", err)
+		}
+		opnames = append(opnames, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("list stock opnames: %w", err)
+	}
+	return opnames, total, nil
 }
 
 func (r *stockOpnameRepository) FindByPublicID(ctx context.Context, publicID string) (*model.StockOpname, []StockOpnameItemWithStockRef, error) {

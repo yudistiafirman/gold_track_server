@@ -100,6 +100,12 @@ func TestStockOpnames_CreateCodeIncrementsSameDay(t *testing.T) {
 	adminToken := login(t, admin.Email, admin.Password)
 
 	first := createStockOpname(t, adminToken)
+	// Only one IN_PROGRESS session is allowed at a time — complete the
+	// first before creating the second to isolate this test to what it's
+	// actually verifying (opname_code increments same-day).
+	if status, resp := doRequest(t, http.MethodPost, "/api/stock-opnames/"+first.ID+"/complete", nil, adminToken); status != http.StatusOK {
+		t.Fatalf("complete first: expected 200, got %d (resp=%+v)", status, resp)
+	}
 	second := createStockOpname(t, adminToken)
 
 	today := time.Now().Format("20060102")
@@ -108,6 +114,123 @@ func TestStockOpnames_CreateCodeIncrementsSameDay(t *testing.T) {
 	}
 	if second.OpnameCode != "OPN-"+today+"-0002" {
 		t.Fatalf("expected second code -0002, got %q", second.OpnameCode)
+	}
+}
+
+func TestStockOpnames_CreateWhileInProgressRejected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	createStockOpname(t, adminToken)
+
+	status, resp := doRequest(t, http.MethodPost, "/api/stock-opnames/", map[string]any{}, adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 while a session is already IN_PROGRESS, got %d (resp=%+v)", status, resp)
+	}
+}
+
+// --- list ---
+
+type stockOpnameListDTO struct {
+	Items      []stockOpnameDTO `json:"items"`
+	Pagination paginationDTO    `json:"pagination"`
+}
+
+func TestStockOpnames_ListRequiresAuth(t *testing.T) {
+	resetDB(t)
+
+	status, _ := doRequest(t, http.MethodGet, "/api/stock-opnames/", nil, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", status)
+	}
+}
+
+func TestStockOpnames_ListNonAdminForbidden(t *testing.T) {
+	resetDB(t)
+	kasir := seedUser(t, "KASIR", true)
+	token := login(t, kasir.Email, kasir.Password)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-opnames/", nil, token)
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d (resp=%+v)", status, resp)
+	}
+}
+
+// TestStockOpnames_ListIncludesInProgressSessions is the whole point of
+// having a list endpoint at all — an IN_PROGRESS session must be
+// discoverable so it can be resumed (via Scan) later, not just sessions
+// that already reached COMPLETED.
+func TestStockOpnames_ListIncludesInProgressSessions(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	inProgress := createStockOpname(t, adminToken)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-opnames/", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var list stockOpnameListDTO
+	decodeData(t, resp, &list)
+
+	if len(list.Items) != 1 || list.Items[0].ID != inProgress.ID {
+		t.Fatalf("expected the IN_PROGRESS session in the list, got %+v", list.Items)
+	}
+	if list.Items[0].Status != "IN_PROGRESS" {
+		t.Fatalf("expected status IN_PROGRESS, got %q", list.Items[0].Status)
+	}
+	if len(list.Items[0].Items) != 0 {
+		t.Fatalf("expected list rows to be header-only (no items[]), got %+v", list.Items[0].Items)
+	}
+}
+
+func TestStockOpnames_ListFiltersByStatusAndOrdersNewestFirst(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	completed := createStockOpname(t, adminToken)
+	if status, resp := doRequest(t, http.MethodPost, "/api/stock-opnames/"+completed.ID+"/complete", nil, adminToken); status != http.StatusOK {
+		t.Fatalf("complete: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	inProgress := createStockOpname(t, adminToken)
+
+	// No filter: both sessions, newest (still-open) first.
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-opnames/", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var all stockOpnameListDTO
+	decodeData(t, resp, &all)
+	if len(all.Items) != 2 {
+		t.Fatalf("expected 2 sessions total, got %d", len(all.Items))
+	}
+	if all.Items[0].ID != inProgress.ID || all.Items[1].ID != completed.ID {
+		t.Fatalf("expected newest-first order [in_progress, completed], got %+v", all.Items)
+	}
+
+	// Filtered: only IN_PROGRESS.
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-opnames/?status=IN_PROGRESS", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var filtered stockOpnameListDTO
+	decodeData(t, resp, &filtered)
+	if len(filtered.Items) != 1 || filtered.Items[0].ID != inProgress.ID {
+		t.Fatalf("expected only the IN_PROGRESS session, got %+v", filtered.Items)
+	}
+}
+
+func TestStockOpnames_ListInvalidStatus(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-opnames/?status=BOGUS", nil, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
 	}
 }
 

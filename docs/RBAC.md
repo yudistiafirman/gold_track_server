@@ -100,6 +100,7 @@ Legenda: ✅ boleh · ❌ tidak boleh
 | Aktivitas | Super Admin | Admin | Kasir | Perubahan Diminta |
 |---|---|---|---|---|
 | Membuka sesi pengecekan stok | ✅ | ✅ | ❌ | |
+| Melihat daftar/riwayat sesi pengecekan | ✅ | ✅ | ❌ | |
 | Melihat detail sesi pengecekan | ✅ | ✅ | ❌ | |
 | Scan barang saat pengecekan | ✅ | ✅ | ❌ | |
 | Menyelesaikan sesi pengecekan | ✅ | ✅ | ❌ | |
