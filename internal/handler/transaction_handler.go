@@ -78,12 +78,13 @@ func toTransactionResponse(t service.TransactionSummary) transactionResponse {
 }
 
 type createTransactionItemRequest struct {
-	StockItemID  string  `json:"stock_item_id"` // SELL / SELL_SUPPLIER
-	ProductID    string  `json:"product_id"`    // BUY
-	SerialNumber string  `json:"serial_number"` // BUY
-	Condition    string  `json:"condition"`     // BUY
-	PriceTotal   float64 `json:"price_total"`   // all types
-	Confirmed    bool    `json:"confirmed"`     // SELL only
+	StockItemID    string  `json:"stock_item_id"`   // SELL / SELL_SUPPLIER
+	ProductID      string  `json:"product_id"`      // BUY
+	SerialNumber   string  `json:"serial_number"`   // BUY
+	Condition      string  `json:"condition"`       // BUY
+	PriceTotal     float64 `json:"price_total"`     // all types
+	Confirmed      bool    `json:"confirmed"`       // SELL only
+	ProductionYear *int    `json:"production_year"` // BUY, optional
 }
 
 type createTransactionRequest struct {
@@ -120,6 +121,7 @@ func (h *TransactionHandler) Create(w http.ResponseWriter, r *http.Request) {
 				SerialNumber:    it.SerialNumber,
 				Condition:       it.Condition,
 				PriceTotal:      it.PriceTotal,
+				ProductionYear:  it.ProductionYear,
 			})
 		}
 		result, err = h.transactionService.CreateBuy(r.Context(), service.CreateBuyInput{

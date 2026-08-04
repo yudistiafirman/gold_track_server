@@ -15,11 +15,12 @@ type purchaseOrderItemDTO struct {
 }
 
 type receivedUnitDTO struct {
-	StockItemID  string `json:"stock_item_id"`
-	Barcode      string `json:"barcode"`
-	ProductName  string `json:"product_name"`
-	SerialNumber string `json:"serial_number"`
-	Condition    string `json:"condition"`
+	StockItemID    string `json:"stock_item_id"`
+	Barcode        string `json:"barcode"`
+	ProductName    string `json:"product_name"`
+	SerialNumber   string `json:"serial_number"`
+	Condition      string `json:"condition"`
+	ProductionYear *int   `json:"production_year"`
 }
 
 type purchaseOrderDTO struct {
@@ -471,6 +472,42 @@ func TestPurchaseOrders_ReceiveSuccess(t *testing.T) {
 		if poID == nil || supplierID == nil {
 			t.Fatalf("expected po_id/supplier_id set on received unit, got po_id=%v supplier_id=%v", poID, supplierID)
 		}
+	}
+}
+
+func TestPurchaseOrders_ReceiveWithProductionYear(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	supplier := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
+	po := createPurchaseOrder(t, adminToken, supplier.ID, []map[string]any{
+		{"product_id": product.ID, "quantity": 2, "purchase_price": 800000},
+	})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/purchase-orders/"+po.ID+"/receive", map[string]any{
+		"items": []map[string]any{
+			{"product_id": product.ID, "serials": []map[string]any{
+				{"serial_number": "PO-SN-YEAR-1", "condition": "GOOD", "production_year": 2024},
+				{"serial_number": "PO-SN-YEAR-2", "condition": "GOOD"},
+			}},
+		},
+	}, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var received purchaseOrderDTO
+	decodeData(t, resp, &received)
+
+	byserial := map[string]receivedUnitDTO{}
+	for _, u := range received.ReceivedUnits {
+		byserial[u.SerialNumber] = u
+	}
+	if got := byserial["PO-SN-YEAR-1"].ProductionYear; got == nil || *got != 2024 {
+		t.Fatalf("expected production_year 2024, got %v", got)
+	}
+	if got := byserial["PO-SN-YEAR-2"].ProductionYear; got != nil {
+		t.Fatalf("expected production_year nil when omitted, got %v", got)
 	}
 }
 

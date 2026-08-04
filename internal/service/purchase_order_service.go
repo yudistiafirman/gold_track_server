@@ -42,6 +42,7 @@ type ReceivedUnitSummary struct {
 	ProductName       string
 	SerialNumber      string
 	Condition         string
+	ProductionYear    *int // optional
 }
 
 // PurchaseOrderSummary is the public-facing view of a PO: only PublicID
@@ -91,8 +92,9 @@ type PurchaseOrderListResult struct {
 // captured per serial since a single shipment isn't guaranteed to be
 // uniformly GOOD or BAD.
 type ReceivePOSerialInput struct {
-	SerialNumber string
-	Condition    string
+	SerialNumber   string
+	Condition      string
+	ProductionYear *int // optional
 }
 
 type ReceivePOItemInput struct {
@@ -313,7 +315,14 @@ func (s *purchaseOrderService) Receive(ctx context.Context, input ReceivePOInput
 				return PurchaseOrderSummary{}, apperror.Conflict("serial_number tidak boleh sama antar unit dalam satu penerimaan", nil)
 			}
 			seenSerials[trimmed] = struct{}{}
-			repoSerials = append(repoSerials, repository.ReceiveSerialInput{SerialNumber: trimmed, Condition: serial.Condition})
+			if err := validateProductionYear(serial.ProductionYear); err != nil {
+				return PurchaseOrderSummary{}, err
+			}
+			repoSerials = append(repoSerials, repository.ReceiveSerialInput{
+				SerialNumber:   trimmed,
+				Condition:      serial.Condition,
+				ProductionYear: serial.ProductionYear,
+			})
 		}
 
 		product, err := s.productRepo.FindByPublicID(ctx, item.ProductPublicID)
@@ -390,6 +399,7 @@ func (s *purchaseOrderService) Receive(ctx context.Context, input ReceivePOInput
 			ProductName:       productNames[u.ProductID],
 			SerialNumber:      u.SerialNumber,
 			Condition:         u.Condition,
+			ProductionYear:    u.ProductionYear,
 		})
 	}
 

@@ -79,7 +79,9 @@ supaya kolom `phone` jadi `NOT NULL` (sebelumnya nullable/opsional). `000023` me
 CHECK constraint `payment_method` di `transactions` supaya terima metode baru (lihat
 `### /api/transactions` di bawah), bukan cuma `CASH`/`TRANSFER`/`QRIS`. `000024` meng-ALTER
 `gold_prices` supaya `created_by` jadi nullable (BE-404, lihat `### /api/gold-prices/active` di
-bawah) — baris hasil sync otomatis tidak punya actor manusia.
+bawah) — baris hasil sync otomatis tidak punya actor manusia. `000025` meng-ALTER `stock_items`
+nambah kolom `production_year` (nullable) — atribut opsional per unit fisik, lihat
+`### /api/products/{productId}/stock-items & /api/stock-items` di bawah.
 
 Menambah migrasi baru: buat pasangan file
 `migrations/{next_number}_{deskripsi}.up.sql` dan `.down.sql`.
@@ -708,6 +710,13 @@ DELETE /api/stock-items/{id}                   # HARD delete, hanya unit AVAILAB
   (`DELETE ... WHERE public_id = $1 AND status = 'AVAILABLE'`), bukan cuma cek-lalu-hapus di
   level aplikasi — kalau baris tidak ke-delete, baru dicek ulang buat bedain "tidak ada" (404)
   vs "ada tapi SOLD" (409).
+- **Ditolak (409) juga kalau unit masih direferensikan tabel lain**, walau statusnya
+  `AVAILABLE` — dua kasus nyata: unit hasil `BUY` (buyback) yang belum terjual lagi (masih ada
+  baris `transaction_items` yang nunjuk ke situ), atau unit yang pernah discan di sesi stock
+  opname (baris `stock_opname_items`). Kedua tabel itu FK ke `stock_items.id` tanpa
+  `ON DELETE CASCADE`, jadi hard-delete-nya bakal ditolak Postgres di level FK — repository
+  nangkep error itu (`isForeignKeyViolation`, pola yang sama dipakai `expense_categories`) dan
+  balikin 409 yang rapi, bukan 500 mentah.
 - **Validasi create pakai status `422`** (`Unprocessable Entity`), bukan `400` seperti endpoint
   lain — `serial_number`, `condition` (harus `GOOD`/`BAD`), `purchase_price` (harus `> 0`), dan
   `purchase_date` (format `YYYY-MM-DD`) semua wajib diisi & valid, kalau tidak → 422.
@@ -719,9 +728,16 @@ DELETE /api/stock-items/{id}                   # HARD delete, hanya unit AVAILAB
   nambah stok ke produk yang sudah tidak dijual.
 - **`PUT` mengunci `barcode` dan `product_id`** — kolom itu sengaja tidak ada di query `UPDATE`,
   persis pola SKU produk yang immutable (BE-203). Field yang bisa diedit: `serial_number`,
-  `condition`, `purchase_price`, `purchase_date`, `notes`. Unit yang `SOLD` ditolak (409) —
-  guard-nya fetch-lalu-cek di service (bukan level SQL seperti `DELETE`, karena edit bukan
-  operasi destruktif tanpa-undo).
+  `condition`, `purchase_price`, `purchase_date`, `production_year`, `notes`. Unit yang `SOLD`
+  ditolak (409) — guard-nya fetch-lalu-cek di service (bukan level SQL seperti `DELETE`, karena
+  edit bukan operasi destruktif tanpa-undo).
+- **`production_year`** (migrasi `000025`) — tahun produksi/cetak unit fisik, **opsional**
+  (`null` kalau tidak diisi, bukan wajib seperti `serial_number`/`condition`). Kalau diisi, harus
+  angka masuk akal (2000 s.d. tahun berjalan + 1), kalau tidak → 422, sama tier validasinya
+  dengan field per-unit lain. Sengaja ditaruh di `stock_items` bukan `products` — dua unit dari
+  produk/SKU yang sama bisa punya tahun produksi berbeda kalau masuk stok di waktu yang berbeda.
+  Field ini juga diterima (opsional, per unit) lewat item `BUY` di `POST /api/transactions` dan
+  per serial di `POST /api/purchase-orders/{id}/receive` — lihat section masing-masing.
 - **`GET /api/stock-items/{id}/label`** berlaku untuk unit `AVAILABLE` **maupun** `SOLD` — cetak
   ulang label diperbolehkan, tidak difilter status.
 - `supplier_id`/`po_id` di luar scope saat ini — selalu `NULL` (belum ada resource purchase
@@ -757,6 +773,7 @@ Contoh response (200):
     "condition": "BAD",
     "purchase_price": 1000000,
     "purchase_date": "2026-07-01",
+    "production_year": null,
     "status": "AVAILABLE",
     "sold_at": null,
     "notes": "",
@@ -779,6 +796,7 @@ Contoh response `POST /api/products/{productId}/stock-items` (201):
     "condition": "GOOD",
     "purchase_price": 1000000,
     "purchase_date": "2026-07-01",
+    "production_year": 2024,
     "status": "AVAILABLE",
     "sold_at": null,
     "notes": "",
@@ -811,6 +829,7 @@ Contoh response error:
 {"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"condition wajib diisi dan harus GOOD atau BAD"}}
 {"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"purchase_price wajib diisi lebih besar dari 0"}}
 {"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"purchase_date wajib diisi dengan format YYYY-MM-DD"}}
+{"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"production_year tidak valid"}}
 
 // 400 — create ke produk yang sudah diarsipkan
 {"success":false,"error":{"code":"BAD_REQUEST","message":"produk sudah diarsipkan, tidak bisa menambah stok"}}
@@ -818,6 +837,7 @@ Contoh response error:
 // 409 — update/delete unit yang sudah SOLD
 {"success":false,"error":{"code":"CONFLICT","message":"unit sudah terjual (SOLD), tidak bisa diedit"}}
 {"success":false,"error":{"code":"CONFLICT","message":"unit sudah terjual (SOLD), tidak bisa dihapus"}}
+{"success":false,"error":{"code":"CONFLICT","message":"unit stok sudah tercatat di transaksi atau stock opname, tidak bisa dihapus"}}
 
 // 404 — {productId} atau {id} tidak ditemukan
 {"success":false,"error":{"code":"NOT_FOUND","message":"produk tidak ditemukan"}}
@@ -855,7 +875,7 @@ Tiga `type` didukung: `SELL` (jual ke pelanggan), `SELL_SUPPLIER` (jual ke suppl
   "customer_id": "<public_id customer, wajib>",
   "payment_method": "CASH",
   "items": [
-    { "product_id": "<public_id produk>", "serial_number": "SN-BUYBACK-01", "condition": "GOOD", "price_total": 900000 }
+    { "product_id": "<public_id produk>", "serial_number": "SN-BUYBACK-01", "condition": "GOOD", "price_total": 900000, "production_year": 2024 }
   ]
 }
 ```
@@ -905,6 +925,11 @@ saat `POST`, klien tidak pernah dipercaya begitu saja buat hal finansial begini.
   ini ada.
 - `condition` (`GOOD`/`BAD`) wajib per item, ditentukan manual per unit fisik — tidak ada
   guard konfirmasi BAD di sisi `BUY` (itu cuma buat `SELL`).
+- `production_year` **opsional** per item (sama aturan validasi dengan BE-501: kalau diisi harus
+  2000 s.d. tahun berjalan+1, kalau tidak → 422). Tersimpan di unit `stock_items` baru tapi
+  **tidak ikut ditampilkan** di response item transaksi (`transactionItemResponse`) — sama seperti
+  `condition`/`purchase_price` yang juga tidak diekspos di situ; cek langsung ke
+  `GET /api/stock-items/{id}` (pakai `stock_item_id` dari response) kalau perlu lihat nilainya.
 - `cogs` transaction_item-nya `NULL` — belum diketahui sampai unit ini nanti terjual lagi.
 - Produk harus ada (404) dan aktif (`is_active=true`, sama seperti guard BE-501 — 400 kalau
   produknya sudah diarsipkan).
@@ -1092,13 +1117,15 @@ semua produk di PO itu** — request `items[]` wajib punya persis produk yang sa
 PO, dan `len(serials)` tiap produk harus **persis sama** dengan `quantity` PO-nya (kurang maupun
 lebih sama-sama ditolak 400, bukan cuma kasus kurang). **`condition` per serial, bukan per
 item** — tiap objek di `serials[]` punya `serial_number` **dan** `condition` sendiri-sendiri
-(`{"serial_number": "...", "condition": "GOOD"}`), karena satu shipment/PO tidak dijamin semua
-unitnya seragam kondisinya (bisa campur `GOOD`/`BAD` dalam satu produk yang sama). Untuk tiap
-serial: satu `stock_items` baru (`status=AVAILABLE`, `barcode` auto-generate pola
-`{SKU}-{urut 4 digit}` sama seperti BE-501/BE-801, `purchase_price` diambil dari PO — **bukan**
-dari request receive, `po_id`/`supplier_id` ikut terisi di unit itu — pertama kalinya kedua kolom
-ini kepakai, sebelumnya selalu `NULL` baik dari create-stock-item langsung (BE-501) maupun
-buyback (BE-801)). Semuanya atomik dalam satu transaksi DB, PO row di-lock (`FOR UPDATE`) selama
+(`{"serial_number": "...", "condition": "GOOD", "production_year": 2024}` — `production_year`
+opsional per serial, sama pola & validasi dengan BE-501/BE-801), karena satu shipment/PO tidak
+dijamin semua unitnya seragam kondisinya maupun tahun produksinya (bisa campur dalam satu produk
+yang sama). Untuk tiap serial: satu `stock_items` baru (`status=AVAILABLE`, `barcode`
+auto-generate pola `{SKU}-{urut 4 digit}` sama seperti BE-501/BE-801, `purchase_price` diambil
+dari PO — **bukan** dari request receive, `po_id`/`supplier_id` ikut terisi di unit itu — pertama
+kalinya kedua kolom ini kepakai, sebelumnya selalu `NULL` baik dari create-stock-item langsung
+(BE-501) maupun buyback (BE-801)). Semuanya atomik dalam satu transaksi DB, PO row di-lock
+(`FOR UPDATE`) selama
 itu supaya PO yang sama tidak bisa diterima dua kali secara konkuren; setelah semua unit masuk,
 PO jadi `status=DITERIMA` + `received_at` terisi. PO yang sudah `DITERIMA`/`DIBATALKAN` tidak
 bisa di-receive lagi → 409.
@@ -1159,7 +1186,7 @@ berbeda (`GOOD` & `BAD`):
     {
       "product_id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f",
       "serials": [
-        { "serial_number": "PO-SN-1", "condition": "GOOD" },
+        { "serial_number": "PO-SN-1", "condition": "GOOD", "production_year": 2024 },
         { "serial_number": "PO-SN-2", "condition": "BAD" }
       ]
     }
@@ -1186,14 +1213,16 @@ Contoh response `POST /api/purchase-orders/{id}/receive` (200) — `status`/`rec
         "barcode": "BAT-ANT-10-001-0001",
         "product_name": "Emas Batangan 10gr",
         "serial_number": "PO-SN-1",
-        "condition": "GOOD"
+        "condition": "GOOD",
+        "production_year": 2024
       },
       {
         "stock_item_id": "2b3c4d5e-6f70-8901-bcde-f01234567890",
         "barcode": "BAT-ANT-10-001-0002",
         "product_name": "Emas Batangan 10gr",
         "serial_number": "PO-SN-2",
-        "condition": "BAD"
+        "condition": "BAD",
+        "production_year": null
       }
     ],
     "created_at": "2026-07-31T09:00:00Z",
@@ -1215,6 +1244,7 @@ Contoh response error:
 
 // 422 — receive, serial_number/condition kosong atau invalid
 {"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"serial_number wajib diisi di setiap unit"}}
+{"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"production_year tidak valid"}}
 
 // 404 — {id}/supplier_id/product_id tidak ditemukan
 {"success":false,"error":{"code":"NOT_FOUND","message":"purchase order tidak ditemukan"}}

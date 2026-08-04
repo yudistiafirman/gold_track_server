@@ -93,8 +93,9 @@ type POFilter struct {
 // per serial since a single shipment isn't guaranteed to be uniformly
 // GOOD or BAD.
 type ReceiveSerialInput struct {
-	SerialNumber string
-	Condition    string
+	SerialNumber   string
+	Condition      string
+	ProductionYear *int // optional
 }
 
 // ReceiveItemInput is one product's physical units arriving — ProductID is
@@ -351,8 +352,8 @@ func (r *purchaseOrderRepository) tryReceive(ctx context.Context, poPublicID str
 	purchaseDate := time.Now()
 
 	const insertStockItemQuery = `
-		INSERT INTO stock_items (product_id, barcode, serial_number, condition, purchase_price, purchase_date, po_id, supplier_id, status, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'AVAILABLE', $9)
+		INSERT INTO stock_items (product_id, barcode, serial_number, condition, purchase_price, purchase_date, production_year, po_id, supplier_id, status, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'AVAILABLE', $10)
 		RETURNING id, public_id::text, created_at, updated_at
 	`
 
@@ -376,19 +377,20 @@ func (r *purchaseOrderRepository) tryReceive(ctx context.Context, poPublicID str
 			barcode := fmt.Sprintf("%s%04d", barcodePrefix, count+1)
 
 			unit := model.StockItem{
-				ProductID:     item.ProductID,
-				SerialNumber:  serial.SerialNumber,
-				Condition:     serial.Condition,
-				PurchasePrice: purchasePrice,
-				PurchaseDate:  purchaseDate,
-				POID:          &poID,
-				SupplierID:    &supplierID,
-				Status:        "AVAILABLE",
-				CreatedBy:     input.CreatedBy,
+				ProductID:      item.ProductID,
+				SerialNumber:   serial.SerialNumber,
+				Condition:      serial.Condition,
+				PurchasePrice:  purchasePrice,
+				PurchaseDate:   purchaseDate,
+				ProductionYear: serial.ProductionYear,
+				POID:           &poID,
+				SupplierID:     &supplierID,
+				Status:         "AVAILABLE",
+				CreatedBy:      input.CreatedBy,
 			}
 			err := tx.QueryRow(ctx, insertStockItemQuery,
 				unit.ProductID, barcode, unit.SerialNumber, unit.Condition, unit.PurchasePrice,
-				unit.PurchaseDate, unit.POID, unit.SupplierID, unit.CreatedBy,
+				unit.PurchaseDate, unit.ProductionYear, unit.POID, unit.SupplierID, unit.CreatedBy,
 			).Scan(&unit.ID, &unit.PublicID, &unit.CreatedAt, &unit.UpdatedAt)
 			if err != nil {
 				if isUniqueViolationOnConstraint(err, uqStockItemsSerialNumber) {

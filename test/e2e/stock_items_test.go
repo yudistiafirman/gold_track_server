@@ -13,15 +13,16 @@ type stockItemProductDTO struct {
 }
 
 type stockItemDTO struct {
-	ID            string              `json:"id"`
-	Product       stockItemProductDTO `json:"product"`
-	Barcode       string              `json:"barcode"`
-	SerialNumber  string              `json:"serial_number"`
-	Condition     string              `json:"condition"`
-	PurchasePrice float64             `json:"purchase_price"`
-	PurchaseDate  string              `json:"purchase_date"`
-	Status        string              `json:"status"`
-	Notes         string              `json:"notes"`
+	ID             string              `json:"id"`
+	Product        stockItemProductDTO `json:"product"`
+	Barcode        string              `json:"barcode"`
+	SerialNumber   string              `json:"serial_number"`
+	Condition      string              `json:"condition"`
+	PurchasePrice  float64             `json:"purchase_price"`
+	PurchaseDate   string              `json:"purchase_date"`
+	ProductionYear *int                `json:"production_year"`
+	Status         string              `json:"status"`
+	Notes          string              `json:"notes"`
 }
 
 type stockItemListDTO struct {
@@ -123,6 +124,39 @@ func TestStockItems_CreateGeneratesBarcode(t *testing.T) {
 	}
 	if created.Product.ID != product.ID {
 		t.Fatalf("expected product ref to match, got %+v", created.Product)
+	}
+}
+
+func TestStockItems_CreateWithProductionYear(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+
+	withYear := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{
+		"serial_number":   "SN-YEAR-1",
+		"production_year": 2024,
+	}))
+	if withYear.ProductionYear == nil || *withYear.ProductionYear != 2024 {
+		t.Fatalf("expected production_year 2024, got %v", withYear.ProductionYear)
+	}
+
+	withoutYear := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "SN-YEAR-2"}))
+	if withoutYear.ProductionYear != nil {
+		t.Fatalf("expected production_year nil when omitted, got %v", withoutYear.ProductionYear)
+	}
+}
+
+func TestStockItems_CreateInvalidProductionYear(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+
+	status, resp := doRequest(t, http.MethodPost, "/api/products/"+product.ID+"/stock-items",
+		validStockItemBody(map[string]any{"production_year": 1899}), adminToken)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d (resp=%+v)", status, resp)
 	}
 }
 
@@ -547,6 +581,61 @@ func TestStockItems_DeleteSoldUnitRejected(t *testing.T) {
 	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+created.ID, nil, adminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected unit to still exist after blocked delete, got %d (resp=%+v)", status, resp)
+	}
+}
+
+// TestStockItems_DeleteReferencedByBuyTransactionRejected covers a unit
+// that stays AVAILABLE right after creation but is already referenced by
+// transaction_items (a BUY/buyback line item) — hard-deleting it would
+// leave that transaction item pointing at nothing, so it must be rejected
+// with a clean 409, not a raw foreign-key-violation 500.
+func TestStockItems_DeleteReferencedByBuyTransactionRejected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "SN-DEL-BUY", "condition": "GOOD", "price_total": 900000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("buy: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+	stockItemID := tx.Items[0].StockItemID
+
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItemID, nil, adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+stockItemID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected unit to still exist after blocked delete, got %d (resp=%+v)", status, resp)
+	}
+}
+
+// TestStockItems_DeleteReferencedByStockOpnameRejected covers a unit that
+// was scanned during a stock opname session (stock_opname_items row created)
+// — same FK-referenced guard as the BUY case above.
+func TestStockItems_DeleteReferencedByStockOpnameRejected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	opname := createStockOpname(t, adminToken)
+	status, resp := doRequest(t, http.MethodPost, "/api/stock-opnames/"+opname.ID+"/scan", map[string]any{"barcode": created.Barcode}, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("scan: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409, got %d (resp=%+v)", status, resp)
 	}
 }
 

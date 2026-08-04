@@ -121,10 +121,11 @@ type CreateSaleInput struct {
 // service layer. Unlike SaleItemInput, there's no existing stock_item to
 // reference — one is created fresh per item.
 type BuyItemInput struct {
-	ProductID    int64
-	SerialNumber string
-	Condition    string
-	PriceTotal   float64
+	ProductID      int64
+	SerialNumber   string
+	Condition      string
+	PriceTotal     float64
+	ProductionYear *int // optional
 }
 
 type CreateBuyInput struct {
@@ -382,13 +383,13 @@ func (r *transactionRepository) tryBuy(ctx context.Context, input CreateBuyInput
 		barcode := fmt.Sprintf("%s%04d", barcodePrefix, count+1)
 
 		const insertStockItemQuery = `
-			INSERT INTO stock_items (product_id, barcode, serial_number, condition, purchase_price, purchase_date, status, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6, 'AVAILABLE', $7)
+			INSERT INTO stock_items (product_id, barcode, serial_number, condition, purchase_price, purchase_date, production_year, status, created_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 'AVAILABLE', $8)
 			RETURNING id, public_id::text
 		`
 		var stockItemID int64
 		var stockItemPublicID string
-		err = tx.QueryRow(ctx, insertStockItemQuery, item.ProductID, barcode, item.SerialNumber, item.Condition, item.PriceTotal, purchaseDate, input.CreatedBy).
+		err = tx.QueryRow(ctx, insertStockItemQuery, item.ProductID, barcode, item.SerialNumber, item.Condition, item.PriceTotal, purchaseDate, item.ProductionYear, input.CreatedBy).
 			Scan(&stockItemID, &stockItemPublicID)
 		if err != nil {
 			if isUniqueViolationOnConstraint(err, uqStockItemsSerialNumber) {

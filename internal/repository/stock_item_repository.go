@@ -29,6 +29,13 @@ var ErrStockItemNotFound = errors.New("stock item not found")
 // number is a genuine client error, not a race to recompute past.
 var ErrSerialNumberTaken = errors.New("serial number already in use")
 
+// ErrStockItemReferenced is returned when a hard-delete is rejected because
+// the unit is still referenced by transaction_items (e.g. a BUY-created
+// unit that hasn't been resold yet) or stock_opname_items (a unit that was
+// scanned in a stock opname session) — deleting it would leave that row
+// pointing at nothing, breaking the transaction/audit trail.
+var ErrStockItemReferenced = errors.New("stock item still referenced by a transaction or stock opname")
+
 const uqStockItemsSerialNumber = "uq_stock_items_serial_number"
 
 const createStockItemMaxAttempts = 5
@@ -54,7 +61,7 @@ type StockItemFilter struct {
 
 const stockItemWithRefsColumns = `
 	si.id, si.public_id::text, si.product_id, si.barcode, si.serial_number, si.condition,
-	si.purchase_price::float8, si.purchase_date, si.supplier_id, si.po_id, si.status, si.sold_at,
+	si.purchase_price::float8, si.purchase_date, si.production_year, si.supplier_id, si.po_id, si.status, si.sold_at,
 	si.notes, si.created_by, si.created_at, si.updated_at,
 	p.public_id::text, p.name, p.sku, p.weight_gram::float8
 `
@@ -78,8 +85,8 @@ type StockItemRepository interface {
 	// ListByProduct returns stock items for a single product matching filter,
 	// along with the total count ignoring pagination.
 	ListByProduct(ctx context.Context, productID int64, filter StockItemFilter) ([]StockItemWithRefs, int, error)
-	// Update applies serial_number/condition/purchase_price/purchase_date/notes
-	// and bumps updated_at — barcode and product_id are deliberately never in
+	// Update applies serial_number/condition/purchase_price/purchase_date/
+	// production_year/notes and bumps updated_at — barcode and product_id are deliberately never in
 	// the SET clause, so they cannot change regardless of what else is edited.
 	Update(ctx context.Context, s *model.StockItem) error
 	// Delete hard-deletes, guarded at the SQL level — only succeeds if the
@@ -125,11 +132,11 @@ func (r *stockItemRepository) tryCreate(ctx context.Context, s *model.StockItem,
 	barcode := fmt.Sprintf("%s%04d", barcodePrefix, count+1)
 
 	const insertQuery = `
-		INSERT INTO stock_items (product_id, barcode, serial_number, condition, purchase_price, purchase_date, status, notes, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO stock_items (product_id, barcode, serial_number, condition, purchase_price, purchase_date, production_year, status, notes, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id, public_id::text, created_at, updated_at
 	`
-	err = tx.QueryRow(ctx, insertQuery, s.ProductID, barcode, s.SerialNumber, s.Condition, s.PurchasePrice, s.PurchaseDate, s.Status, s.Notes, s.CreatedBy).
+	err = tx.QueryRow(ctx, insertQuery, s.ProductID, barcode, s.SerialNumber, s.Condition, s.PurchasePrice, s.PurchaseDate, s.ProductionYear, s.Status, s.Notes, s.CreatedBy).
 		Scan(&s.ID, &s.PublicID, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		if isUniqueViolationOnConstraint(err, uqStockItemsSerialNumber) {
@@ -151,7 +158,7 @@ func (r *stockItemRepository) tryCreate(ctx context.Context, s *model.StockItem,
 func scanStockItemWithRefs(row pgx.Row, s *StockItemWithRefs) error {
 	return row.Scan(
 		&s.ID, &s.PublicID, &s.ProductID, &s.Barcode, &s.SerialNumber, &s.Condition,
-		&s.PurchasePrice, &s.PurchaseDate, &s.SupplierID, &s.POID, &s.Status, &s.SoldAt,
+		&s.PurchasePrice, &s.PurchaseDate, &s.ProductionYear, &s.SupplierID, &s.POID, &s.Status, &s.SoldAt,
 		&s.Notes, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
 		&s.ProductPublicID, &s.ProductName, &s.ProductSKU, &s.ProductWeight,
 	)
@@ -237,11 +244,11 @@ func (r *stockItemRepository) Update(ctx context.Context, s *model.StockItem) er
 	const query = `
 		UPDATE stock_items
 		SET serial_number = $1, condition = $2, purchase_price = $3, purchase_date = $4,
-			notes = $5, updated_at = now()
-		WHERE id = $6
+			production_year = $5, notes = $6, updated_at = now()
+		WHERE id = $7
 		RETURNING updated_at
 	`
-	err := r.db.QueryRow(ctx, query, s.SerialNumber, s.Condition, s.PurchasePrice, s.PurchaseDate, s.Notes, s.ID).
+	err := r.db.QueryRow(ctx, query, s.SerialNumber, s.Condition, s.PurchasePrice, s.PurchaseDate, s.ProductionYear, s.Notes, s.ID).
 		Scan(&s.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -256,6 +263,9 @@ func (r *stockItemRepository) Delete(ctx context.Context, publicID string) (bool
 	const query = `DELETE FROM stock_items WHERE public_id = $1 AND status = 'AVAILABLE'`
 	tag, err := r.db.Exec(ctx, query, publicID)
 	if err != nil {
+		if isForeignKeyViolation(err) {
+			return false, ErrStockItemReferenced
+		}
 		return false, fmt.Errorf("delete stock item: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil

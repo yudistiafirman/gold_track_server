@@ -34,19 +34,20 @@ var allowedStockStatuses = map[string]struct{}{
 // PublicID (UUID) ever leaves this layer, the internal bigint PK stays in
 // model.StockItem/the repository.
 type StockItemSummary struct {
-	PublicID      string
-	Product       ProductRef
-	WeightGram    float64
-	Barcode       string
-	SerialNumber  string
-	Condition     string
-	PurchasePrice float64
-	PurchaseDate  string // "2006-01-02"
-	Status        string
-	SoldAt        *time.Time
-	Notes         string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	PublicID       string
+	Product        ProductRef
+	WeightGram     float64
+	Barcode        string
+	SerialNumber   string
+	Condition      string
+	PurchasePrice  float64
+	PurchaseDate   string // "2006-01-02"
+	ProductionYear *int   // optional
+	Status         string
+	SoldAt         *time.Time
+	Notes          string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // StockItemLabel is the narrow view BE-505 needs to render a CODE128 label
@@ -65,17 +66,19 @@ type CreateStockItemInput struct {
 	Condition         string
 	PurchasePrice     float64
 	PurchaseDate      string // "2006-01-02"
+	ProductionYear    *int   // optional
 	Notes             string
 	CreatedByPublicID string
 }
 
 type UpdateStockItemInput struct {
-	PublicID      string
-	SerialNumber  string
-	Condition     string
-	PurchasePrice float64
-	PurchaseDate  string // "2006-01-02"
-	Notes         string
+	PublicID       string
+	SerialNumber   string
+	Condition      string
+	PurchasePrice  float64
+	PurchaseDate   string // "2006-01-02"
+	ProductionYear *int   // optional
+	Notes          string
 }
 
 type ListStockItemsInput struct {
@@ -145,6 +148,9 @@ func (s *stockItemService) Create(ctx context.Context, input CreateStockItemInpu
 	if err != nil {
 		return StockItemSummary{}, err
 	}
+	if err := validateProductionYear(input.ProductionYear); err != nil {
+		return StockItemSummary{}, err
+	}
 
 	creator, err := s.userRepo.FindByPublicID(ctx, input.CreatedByPublicID)
 	if err != nil {
@@ -154,14 +160,15 @@ func (s *stockItemService) Create(ctx context.Context, input CreateStockItemInpu
 	barcodePrefix := product.SKU + "-"
 
 	stockItem := &model.StockItem{
-		ProductID:     product.ID,
-		SerialNumber:  serialNumber,
-		Condition:     input.Condition,
-		PurchasePrice: input.PurchasePrice,
-		PurchaseDate:  purchaseDate,
-		Notes:         nilIfEmpty(input.Notes),
-		Status:        "AVAILABLE",
-		CreatedBy:     creator.ID,
+		ProductID:      product.ID,
+		SerialNumber:   serialNumber,
+		Condition:      input.Condition,
+		PurchasePrice:  input.PurchasePrice,
+		PurchaseDate:   purchaseDate,
+		ProductionYear: input.ProductionYear,
+		Notes:          nilIfEmpty(input.Notes),
+		Status:         "AVAILABLE",
+		CreatedBy:      creator.ID,
 	}
 
 	created, err := s.stockItemRepo.CreateWithGeneratedBarcode(ctx, stockItem, barcodePrefix)
@@ -273,6 +280,9 @@ func (s *stockItemService) Update(ctx context.Context, input UpdateStockItemInpu
 	if err != nil {
 		return StockItemSummary{}, err
 	}
+	if err := validateProductionYear(input.ProductionYear); err != nil {
+		return StockItemSummary{}, err
+	}
 
 	existing, err := s.stockItemRepo.FindByPublicID(ctx, input.PublicID)
 	if err != nil {
@@ -289,6 +299,7 @@ func (s *stockItemService) Update(ctx context.Context, input UpdateStockItemInpu
 	existing.Condition = input.Condition
 	existing.PurchasePrice = input.PurchasePrice
 	existing.PurchaseDate = purchaseDate
+	existing.ProductionYear = input.ProductionYear
 	existing.Notes = nilIfEmpty(input.Notes)
 
 	if err := s.stockItemRepo.Update(ctx, &existing.StockItem); err != nil {
@@ -304,6 +315,9 @@ func (s *stockItemService) Update(ctx context.Context, input UpdateStockItemInpu
 func (s *stockItemService) Delete(ctx context.Context, publicID string) error {
 	deleted, err := s.stockItemRepo.Delete(ctx, publicID)
 	if err != nil {
+		if errors.Is(err, repository.ErrStockItemReferenced) {
+			return apperror.Conflict("unit stok sudah tercatat di transaksi atau stock opname, tidak bisa dihapus", nil)
+		}
 		return apperror.Internal("failed to delete stock item", err)
 	}
 	if deleted {
@@ -354,25 +368,40 @@ func validateStockItemFields(serialNumber, condition string, purchasePrice float
 	return purchaseDate, nil
 }
 
+// validateProductionYear is optional — not every product/unit has a known
+// production/mint year — but when supplied it must be a plausible year, not
+// an arbitrary integer.
+func validateProductionYear(year *int) error {
+	if year == nil {
+		return nil
+	}
+	currentYear := time.Now().Year()
+	if *year < 2000 || *year > currentYear+1 {
+		return apperror.UnprocessableEntity("production_year tidak valid", nil)
+	}
+	return nil
+}
+
 func toStockItemSummary(s *model.StockItem, product ProductRef, weightGram float64) StockItemSummary {
 	notes := ""
 	if s.Notes != nil {
 		notes = *s.Notes
 	}
 	return StockItemSummary{
-		PublicID:      s.PublicID,
-		Product:       product,
-		WeightGram:    weightGram,
-		Barcode:       s.Barcode,
-		SerialNumber:  s.SerialNumber,
-		Condition:     s.Condition,
-		PurchasePrice: s.PurchasePrice,
-		PurchaseDate:  s.PurchaseDate.Format(stockItemDateLayout),
-		Status:        s.Status,
-		SoldAt:        s.SoldAt,
-		Notes:         notes,
-		CreatedAt:     s.CreatedAt,
-		UpdatedAt:     s.UpdatedAt,
+		PublicID:       s.PublicID,
+		Product:        product,
+		WeightGram:     weightGram,
+		Barcode:        s.Barcode,
+		SerialNumber:   s.SerialNumber,
+		Condition:      s.Condition,
+		PurchasePrice:  s.PurchasePrice,
+		PurchaseDate:   s.PurchaseDate.Format(stockItemDateLayout),
+		ProductionYear: s.ProductionYear,
+		Status:         s.Status,
+		SoldAt:         s.SoldAt,
+		Notes:          notes,
+		CreatedAt:      s.CreatedAt,
+		UpdatedAt:      s.UpdatedAt,
 	}
 }
 

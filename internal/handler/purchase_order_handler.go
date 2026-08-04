@@ -30,11 +30,12 @@ type purchaseOrderItemResponse struct {
 // receivedUnitResponse is a newly created stock item from a receive call —
 // gives the admin the barcode right away to print a label.
 type receivedUnitResponse struct {
-	StockItemID  string `json:"stock_item_id"`
-	Barcode      string `json:"barcode"`
-	ProductName  string `json:"product_name"`
-	SerialNumber string `json:"serial_number"`
-	Condition    string `json:"condition"`
+	StockItemID    string `json:"stock_item_id"`
+	Barcode        string `json:"barcode"`
+	ProductName    string `json:"product_name"`
+	SerialNumber   string `json:"serial_number"`
+	Condition      string `json:"condition"`
+	ProductionYear *int   `json:"production_year"`
 }
 
 // purchaseOrderResponse.Items is omitted (empty) for list rows — only
@@ -67,11 +68,12 @@ func toPurchaseOrderResponse(po service.PurchaseOrderSummary) purchaseOrderRespo
 	receivedUnits := make([]receivedUnitResponse, 0, len(po.ReceivedUnits))
 	for _, u := range po.ReceivedUnits {
 		receivedUnits = append(receivedUnits, receivedUnitResponse{
-			StockItemID:  u.StockItemPublicID,
-			Barcode:      u.Barcode,
-			ProductName:  u.ProductName,
-			SerialNumber: u.SerialNumber,
-			Condition:    u.Condition,
+			StockItemID:    u.StockItemPublicID,
+			Barcode:        u.Barcode,
+			ProductName:    u.ProductName,
+			SerialNumber:   u.SerialNumber,
+			Condition:      u.Condition,
+			ProductionYear: u.ProductionYear,
 		})
 	}
 
@@ -193,8 +195,9 @@ func (h *PurchaseOrderHandler) Get(w http.ResponseWriter, r *http.Request) {
 // per-serial since a single shipment isn't guaranteed to be uniformly
 // GOOD or BAD.
 type receivePOSerialRequest struct {
-	SerialNumber string `json:"serial_number"`
-	Condition    string `json:"condition"`
+	SerialNumber   string `json:"serial_number"`
+	Condition      string `json:"condition"`
+	ProductionYear *int   `json:"production_year"`
 }
 
 type receivePOItemRequest struct {
@@ -230,8 +233,9 @@ func (h *PurchaseOrderHandler) Receive(w http.ResponseWriter, r *http.Request) {
 		serials := make([]service.ReceivePOSerialInput, 0, len(it.Serials))
 		for _, s := range it.Serials {
 			serials = append(serials, service.ReceivePOSerialInput{
-				SerialNumber: s.SerialNumber,
-				Condition:    s.Condition,
+				SerialNumber:   s.SerialNumber,
+				Condition:      s.Condition,
+				ProductionYear: s.ProductionYear,
 			})
 		}
 		items = append(items, service.ReceivePOItemInput{

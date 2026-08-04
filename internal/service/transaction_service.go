@@ -87,6 +87,7 @@ type CreateBuyItemInput struct {
 	SerialNumber    string
 	Condition       string
 	PriceTotal      float64
+	ProductionYear  *int // optional
 }
 
 type CreateBuyInput struct {
@@ -329,6 +330,9 @@ func (s *transactionService) CreateBuy(ctx context.Context, input CreateBuyInput
 			return TransactionSummary{}, apperror.Conflict("serial_number tidak boleh sama antar item dalam satu transaksi", nil)
 		}
 		seenSerialNumbers[serialNumber] = struct{}{}
+		if err := validateProductionYear(item.ProductionYear); err != nil {
+			return TransactionSummary{}, err
+		}
 	}
 
 	customer, err := s.customerRepo.FindByPublicID(ctx, input.CustomerPublicID)
@@ -357,10 +361,11 @@ func (s *transactionService) CreateBuy(ctx context.Context, input CreateBuyInput
 			return TransactionSummary{}, apperror.BadRequest("produk sudah diarsipkan, tidak bisa menambah stok", nil)
 		}
 		buyItems = append(buyItems, repository.BuyItemInput{
-			ProductID:    product.ID,
-			SerialNumber: strings.TrimSpace(item.SerialNumber),
-			Condition:    item.Condition,
-			PriceTotal:   item.PriceTotal,
+			ProductID:      product.ID,
+			SerialNumber:   strings.TrimSpace(item.SerialNumber),
+			Condition:      item.Condition,
+			PriceTotal:     item.PriceTotal,
+			ProductionYear: item.ProductionYear,
 		})
 	}
 

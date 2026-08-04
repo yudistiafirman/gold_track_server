@@ -466,6 +466,33 @@ func TestTransactions_CreateBuyFromCustomer(t *testing.T) {
 	}
 }
 
+func TestTransactions_BuyWithProductionYear(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "BUY-SN-YEAR", "condition": "GOOD", "price_total": 900000, "production_year": 2023},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+tx.Items[0].StockItemID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get created stock item: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var stockItem stockItemDTO
+	decodeData(t, resp, &stockItem)
+	if stockItem.ProductionYear == nil || *stockItem.ProductionYear != 2023 {
+		t.Fatalf("expected production_year 2023 on new unit, got %v", stockItem.ProductionYear)
+	}
+}
+
 func TestTransactions_BuyMultipleItemsSameProductGetsSequentialBarcodes(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)

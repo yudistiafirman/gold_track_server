@@ -36,18 +36,19 @@ type stockItemProductResponse struct {
 // never serialized to JSON. purchase_date is a plain "2006-01-02" string
 // (the column is a DATE, not a TIMESTAMPTZ).
 type stockItemResponse struct {
-	ID            string                   `json:"id"`
-	Product       stockItemProductResponse `json:"product"`
-	Barcode       string                   `json:"barcode"`
-	SerialNumber  string                   `json:"serial_number"`
-	Condition     string                   `json:"condition"`
-	PurchasePrice float64                  `json:"purchase_price"`
-	PurchaseDate  string                   `json:"purchase_date"`
-	Status        string                   `json:"status"`
-	SoldAt        *time.Time               `json:"sold_at"`
-	Notes         string                   `json:"notes"`
-	CreatedAt     time.Time                `json:"created_at"`
-	UpdatedAt     time.Time                `json:"updated_at"`
+	ID             string                   `json:"id"`
+	Product        stockItemProductResponse `json:"product"`
+	Barcode        string                   `json:"barcode"`
+	SerialNumber   string                   `json:"serial_number"`
+	Condition      string                   `json:"condition"`
+	PurchasePrice  float64                  `json:"purchase_price"`
+	PurchaseDate   string                   `json:"purchase_date"`
+	ProductionYear *int                     `json:"production_year"`
+	Status         string                   `json:"status"`
+	SoldAt         *time.Time               `json:"sold_at"`
+	Notes          string                   `json:"notes"`
+	CreatedAt      time.Time                `json:"created_at"`
+	UpdatedAt      time.Time                `json:"updated_at"`
 }
 
 func toStockItemResponse(s service.StockItemSummary) stockItemResponse {
@@ -58,16 +59,17 @@ func toStockItemResponse(s service.StockItemSummary) stockItemResponse {
 			Name:       s.Product.Name,
 			WeightGram: s.WeightGram,
 		},
-		Barcode:       s.Barcode,
-		SerialNumber:  s.SerialNumber,
-		Condition:     s.Condition,
-		PurchasePrice: s.PurchasePrice,
-		PurchaseDate:  s.PurchaseDate,
-		Status:        s.Status,
-		SoldAt:        s.SoldAt,
-		Notes:         s.Notes,
-		CreatedAt:     s.CreatedAt,
-		UpdatedAt:     s.UpdatedAt,
+		Barcode:        s.Barcode,
+		SerialNumber:   s.SerialNumber,
+		Condition:      s.Condition,
+		PurchasePrice:  s.PurchasePrice,
+		PurchaseDate:   s.PurchaseDate,
+		ProductionYear: s.ProductionYear,
+		Status:         s.Status,
+		SoldAt:         s.SoldAt,
+		Notes:          s.Notes,
+		CreatedAt:      s.CreatedAt,
+		UpdatedAt:      s.UpdatedAt,
 	}
 }
 
@@ -89,11 +91,12 @@ type stockItemLabelResponse struct {
 }
 
 type createStockItemRequest struct {
-	SerialNumber  string  `json:"serial_number"`
-	Condition     string  `json:"condition"`
-	PurchasePrice float64 `json:"purchase_price"`
-	PurchaseDate  string  `json:"purchase_date"`
-	Notes         string  `json:"notes"`
+	SerialNumber   string  `json:"serial_number"`
+	Condition      string  `json:"condition"`
+	PurchasePrice  float64 `json:"purchase_price"`
+	PurchaseDate   string  `json:"purchase_date"`
+	ProductionYear *int    `json:"production_year"`
+	Notes          string  `json:"notes"`
 }
 
 func (h *StockItemHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -121,6 +124,7 @@ func (h *StockItemHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Condition:         req.Condition,
 		PurchasePrice:     req.PurchasePrice,
 		PurchaseDate:      req.PurchaseDate,
+		ProductionYear:    req.ProductionYear,
 		Notes:             req.Notes,
 		CreatedByPublicID: claims.UserID,
 	})
@@ -233,11 +237,12 @@ func (h *StockItemHandler) GetLabel(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateStockItemRequest struct {
-	SerialNumber  string  `json:"serial_number"`
-	Condition     string  `json:"condition"`
-	PurchasePrice float64 `json:"purchase_price"`
-	PurchaseDate  string  `json:"purchase_date"`
-	Notes         string  `json:"notes"`
+	SerialNumber   string  `json:"serial_number"`
+	Condition      string  `json:"condition"`
+	PurchasePrice  float64 `json:"purchase_price"`
+	PurchaseDate   string  `json:"purchase_date"`
+	ProductionYear *int    `json:"production_year"`
+	Notes          string  `json:"notes"`
 }
 
 func (h *StockItemHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -254,12 +259,13 @@ func (h *StockItemHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := h.stockItemService.Update(r.Context(), service.UpdateStockItemInput{
-		PublicID:      id,
-		SerialNumber:  req.SerialNumber,
-		Condition:     req.Condition,
-		PurchasePrice: req.PurchasePrice,
-		PurchaseDate:  req.PurchaseDate,
-		Notes:         req.Notes,
+		PublicID:       id,
+		SerialNumber:   req.SerialNumber,
+		Condition:      req.Condition,
+		PurchasePrice:  req.PurchasePrice,
+		PurchaseDate:   req.PurchaseDate,
+		ProductionYear: req.ProductionYear,
+		Notes:          req.Notes,
 	})
 	if err != nil {
 		response.Error(w, err)
