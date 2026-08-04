@@ -81,7 +81,7 @@ func (r *expenseCategoryRepository) FindByPublicID(ctx context.Context, publicID
 }
 
 func (r *expenseCategoryRepository) List(ctx context.Context) ([]model.ExpenseCategory, error) {
-	query := `SELECT ` + expenseCategoryColumns + ` FROM expense_categories ORDER BY id`
+	query := `SELECT ` + expenseCategoryColumns + ` FROM expense_categories ORDER BY id DESC`
 
 	rows, err := r.db.Query(ctx, query)
 	if err != nil {

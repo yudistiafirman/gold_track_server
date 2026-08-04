@@ -74,7 +74,7 @@ func (r *categoryRepository) FindByPublicID(ctx context.Context, publicID string
 }
 
 func (r *categoryRepository) List(ctx context.Context) ([]model.Category, error) {
-	query := `SELECT ` + categoryColumns + ` FROM categories ORDER BY id`
+	query := `SELECT ` + categoryColumns + ` FROM categories ORDER BY id DESC`
 
 	rows, err := r.db.Query(ctx, query)
 	if err != nil {

@@ -218,7 +218,7 @@ func (r *stockItemRepository) ListByProduct(ctx context.Context, productID int64
 	offsetArg := len(args) + 2
 	listArgs := append(append([]any{}, args...), filter.Limit, (filter.Page-1)*filter.Limit)
 	listQuery := `SELECT ` + stockItemWithRefsColumns + stockItemWithRefsFrom + where +
-		fmt.Sprintf(" ORDER BY si.id LIMIT $%d OFFSET $%d", limitArg, offsetArg)
+		fmt.Sprintf(" ORDER BY si.id DESC LIMIT $%d OFFSET $%d", limitArg, offsetArg)
 
 	rows, err := r.db.Query(ctx, listQuery, listArgs...)
 	if err != nil {

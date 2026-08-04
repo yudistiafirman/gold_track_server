@@ -93,7 +93,7 @@ func (r *customerRepository) List(ctx context.Context, filter CustomerFilter) ([
 	offsetArg := len(args) + 2
 	listArgs := append(append([]any{}, args...), filter.Limit, (filter.Page-1)*filter.Limit)
 	listQuery := `SELECT ` + customerColumns + ` FROM customers ` + where +
-		fmt.Sprintf(" ORDER BY id LIMIT $%d OFFSET $%d", limitArg, offsetArg)
+		fmt.Sprintf(" ORDER BY id DESC LIMIT $%d OFFSET $%d", limitArg, offsetArg)
 
 	rows, err := r.db.Query(ctx, listQuery, listArgs...)
 	if err != nil {

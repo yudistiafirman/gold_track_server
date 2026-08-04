@@ -175,7 +175,7 @@ func (r *productRepository) List(ctx context.Context, filter ProductFilter) ([]P
 	offsetArg := len(args) + 2
 	listArgs := append(append([]any{}, args...), filter.Limit, (filter.Page-1)*filter.Limit)
 	listQuery := `SELECT ` + productWithRefsColumns + productWithRefsFrom + where +
-		fmt.Sprintf(" ORDER BY p.id LIMIT $%d OFFSET $%d", limitArg, offsetArg)
+		fmt.Sprintf(" ORDER BY p.id DESC LIMIT $%d OFFSET $%d", limitArg, offsetArg)
 
 	rows, err := r.db.Query(ctx, listQuery, listArgs...)
 	if err != nil {

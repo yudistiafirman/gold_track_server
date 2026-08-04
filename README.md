@@ -241,6 +241,7 @@ Catatan:
   referensi `users.id` lewat FK tanpa `ON DELETE CASCADE`, jadi hard delete akan gagal begitu
   user itu pernah membuat data apa pun. Reaktivasi lewat `PUT` dengan `is_active: true`.
 - SUPER_ADMIN tidak bisa menonaktifkan akun sendiri lewat `DELETE` (mencegah lockout).
+- `GET /api/users` (list, tanpa pagination) urut **terbaru duluan** (`ORDER BY id DESC`).
 
 ### /api/categories & /api/brands — master data (ADMIN & SUPER_ADMIN)
 
@@ -317,6 +318,8 @@ Catatan:
   sendiri" seperti di `/api/users` karena resource ini bukan akun.
 - `products.category_id`/`products.brand_id` (migration `000019`) adalah FK ke tabel ini —
   lihat `### POST /api/products` di bawah.
+- `GET /api/categories`/`GET /api/brands` (list, tanpa pagination) urut **terbaru duluan**
+  (`ORDER BY id DESC`).
 
 ### /api/products — katalog produk
 
@@ -447,7 +450,8 @@ Query params, semua opsional:
 - `page` (default `1`), `limit` (default `20`, di-cap maksimum `100`).
 
 List **selalu** `WHERE is_active = true` — produk yang diarsipkan tidak pernah muncul di sini,
-walau requester-nya SUPER_ADMIN.
+walau requester-nya SUPER_ADMIN. Urut **terbaru duluan** (`ORDER BY id DESC`) — produk yang baru
+saja dibuat langsung muncul di halaman pertama, bukan kekubur di halaman terakhir.
 
 Contoh response `GET /api/products?search=emas&page=1&limit=20` (200):
 ```json
@@ -525,7 +529,8 @@ Beda dari `/api/products` (BE-202): `GET /api/suppliers` **tidak** memfilter `is
 yang sudah diarsipkan tetap muncul di list (field `is_active` di response tinggal dicek klien),
 karena admin mungkin masih perlu cari supplier lama buat referensi PO/transaksi historis. `?search`
 cocok ke `name` (`ILIKE`, case-insensitive substring); `page`/`limit` sama seperti `/api/products`
-(default `1`/`20`, `limit` di-cap `100`).
+(default `1`/`20`, `limit` di-cap `100`). Urut **terbaru duluan** (`ORDER BY id DESC`), sama seperti
+`/api/products`.
 
 Contoh response `POST /api/suppliers` (201):
 ```json
@@ -629,7 +634,7 @@ pelanggan baru & cari data pelanggan pas transaksi. `PUT`/`DELETE` tetap dikunci
 diisi, harus `KTP`/`SIM`/`PASSPORT` (400 kalau bukan). `?search` cocok ke `name` **atau** `phone`
 (satu query param, match salah satu). Sama seperti `/api/suppliers`: list **tidak** memfilter
 `is_active` — pelanggan yang diarsipkan tetap muncul di list (berguna buat cari histori
-transaksi pelanggan lama).
+transaksi pelanggan lama). Urut **terbaru duluan** (`ORDER BY id DESC`).
 
 Contoh response `POST /api/customers` (201):
 ```json
@@ -752,6 +757,8 @@ DELETE /api/stock-items/{id}                   # HARD delete, hanya unit AVAILAB
   `uq_stock_items_barcode`, persis pola SKU produk (BE-201) tapi 4 digit, bukan 3.
 - **Create ditolak (400) kalau produknya sudah diarsipkan** (`is_active=false`) — tidak bisa
   nambah stok ke produk yang sudah tidak dijual.
+- **`GET .../stock-items` (list per produk) urut terbaru duluan** (`ORDER BY si.id DESC`) —
+  unit yang baru ditambah langsung muncul di halaman pertama.
 - **`PUT` mengunci `barcode` dan `product_id`** — kolom itu sengaja tidak ada di query `UPDATE`,
   persis pola SKU produk yang immutable (BE-203). Field yang bisa diedit: `serial_number`,
   `condition`, `purchase_price`, `purchase_date`, `production_year`, `notes`. Unit yang `SOLD`
@@ -1451,6 +1458,9 @@ berbeda di sini.
 lebih `expenses` (`expenses.category_id` adalah FK `RESTRICT` ke `expense_categories`, jadi
 Postgres sendiri yang menegakkan integritasnya — bukan pre-check manual yang rawan race, error
 foreign-key-violation dari DB langsung ditangkap dan dipetakan ke 409).
+
+`GET /api/expense-categories` (list flat, tanpa pagination) urut **terbaru duluan**
+(`ORDER BY id DESC`).
 
 `amount`/`category_id`/`expense_date` di `POST`/`PUT /api/expenses` wajib diisi (`400` kalau
 kosong/invalid — bukan tier `422`, karena tier itu di codebase ini khusus validasi pembuatan unit

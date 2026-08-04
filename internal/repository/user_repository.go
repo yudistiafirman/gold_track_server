@@ -123,7 +123,7 @@ func (r *userRepository) FindByPublicID(ctx context.Context, publicID string) (*
 }
 
 func (r *userRepository) List(ctx context.Context) ([]model.User, error) {
-	query := `SELECT ` + userColumns + ` FROM users ORDER BY id`
+	query := `SELECT ` + userColumns + ` FROM users ORDER BY id DESC`
 
 	rows, err := r.db.Query(ctx, query)
 	if err != nil {

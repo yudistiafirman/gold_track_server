@@ -74,7 +74,7 @@ func (r *brandRepository) FindByPublicID(ctx context.Context, publicID string) (
 }
 
 func (r *brandRepository) List(ctx context.Context) ([]model.Brand, error) {
-	query := `SELECT ` + brandColumns + ` FROM brands ORDER BY id`
+	query := `SELECT ` + brandColumns + ` FROM brands ORDER BY id DESC`
 
 	rows, err := r.db.Query(ctx, query)
 	if err != nil {
