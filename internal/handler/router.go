@@ -52,7 +52,7 @@ func NewRouter(
 	r.Get("/health", healthHandler.Check)
 
 	r.Route("/api", func(r chi.Router) {
-		r.Post("/auth/login", authHandler.Login)
+		r.With(appmw.LoginRateLimit()).Post("/auth/login", authHandler.Login)
 
 		r.Group(func(r chi.Router) {
 			r.Use(appmw.JWTAuth(authService))

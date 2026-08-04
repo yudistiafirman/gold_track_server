@@ -25,6 +25,11 @@ type App struct {
 	// sync goroutine itself — kept out of New() so the e2e test harness
 	// (which also calls New()) never fires real external HTTP calls.
 	GoldPriceService service.GoldPriceService
+	// TokenBlacklistRepo is exposed so cmd/api can drive a periodic cleanup
+	// of expired blacklist rows — kept out of New() for the same reason as
+	// GoldPriceService (the e2e harness calls New() too and shouldn't get a
+	// background goroutine it never asked for).
+	TokenBlacklistRepo repository.TokenBlacklistRepository
 }
 
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error) {
@@ -103,5 +108,5 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 
 	router := handler.NewRouter(log, cfg.CORS, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler, transactionHandler, purchaseOrderHandler, stockOpnameHandler, expenseCategoryHandler, expenseHandler, reportHandler, settingsHandler, goldPriceHandler)
 
-	return &App{Pool: dbPool, Router: router, GoldPriceService: goldPriceService}, nil
+	return &App{Pool: dbPool, Router: router, GoldPriceService: goldPriceService, TokenBlacklistRepo: tokenBlacklistRepo}, nil
 }

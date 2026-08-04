@@ -32,6 +32,10 @@ func (f *fakeBlacklist) IsBlacklisted(_ context.Context, jti string) (bool, erro
 	return f.blacklisted[jti], nil
 }
 
+func (f *fakeBlacklist) DeleteExpired(_ context.Context) (int64, error) {
+	return 0, nil
+}
+
 func newAuthService(blacklist *fakeBlacklist) service.AuthService {
 	return service.NewAuthService(nil, blacklist, testSecret, time.Hour)
 }

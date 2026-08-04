@@ -13,8 +13,14 @@ import (
 	"gold-track-be/internal/app"
 	"gold-track-be/internal/config"
 	"gold-track-be/internal/logger"
+	"gold-track-be/internal/repository"
 	"gold-track-be/internal/service"
 )
+
+// tokenBlacklistCleanupInterval drives how often expired token_blacklist
+// rows get swept — hourly is frequent enough to keep the table from growing
+// unbounded without adding meaningful DB load.
+const tokenBlacklistCleanupInterval = time.Hour
 
 func main() {
 	cfg, err := config.Load()
@@ -52,6 +58,7 @@ func main() {
 	}()
 
 	go runGoldPriceSync(ctx, application.GoldPriceService, cfg.GoldPrice.SyncInterval, log)
+	go runTokenBlacklistCleanup(ctx, application.TokenBlacklistRepo, log)
 
 	<-ctx.Done()
 	log.Info("shutdown signal received")
@@ -86,6 +93,31 @@ func runGoldPriceSync(ctx context.Context, svc service.GoldPriceService, interva
 		case <-ticker.C:
 			if err := svc.SyncOnce(ctx); err != nil {
 				log.Error("gold price sync failed", "error", err)
+			}
+		}
+	}
+}
+
+// runTokenBlacklistCleanup periodically deletes token_blacklist rows past
+// their own expiry (see TokenBlacklistRepository.DeleteExpired) — once a
+// token has expired it's rejected on that basis anyway, so the blacklist row
+// is just dead weight the table would otherwise accumulate forever.
+func runTokenBlacklistCleanup(ctx context.Context, repo repository.TokenBlacklistRepository, log *slog.Logger) {
+	ticker := time.NewTicker(tokenBlacklistCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			deleted, err := repo.DeleteExpired(ctx)
+			if err != nil {
+				log.Error("token blacklist cleanup failed", "error", err)
+				continue
+			}
+			if deleted > 0 {
+				log.Info("token blacklist cleanup", "deleted", deleted)
 			}
 		}
 	}

@@ -1,0 +1,11 @@
+.git
+.env
+.env.example
+*.log
+/bin
+/tmp
+.DS_Store
+docs
+test
+README.md
+CLAUDE.md

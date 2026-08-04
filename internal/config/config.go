@@ -99,8 +99,10 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		App: AppConfig{
-			Env:  appEnv,
-			Port: getEnv("APP_PORT", "8080"),
+			Env: appEnv,
+			// Railway (and most PaaS) inject PORT and expect the app to
+			// listen on it; APP_PORT stays the local-dev override.
+			Port: getEnv("PORT", getEnv("APP_PORT", "8080")),
 		},
 		Database: DatabaseConfig{
 			Host:            getEnv("DB_HOST", "localhost"),

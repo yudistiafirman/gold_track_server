@@ -63,6 +63,10 @@ func UnprocessableEntity(message string, err error) *AppError {
 	return New(http.StatusUnprocessableEntity, "UNPROCESSABLE_ENTITY", message, err)
 }
 
+func TooManyRequests(message string, err error) *AppError {
+	return New(http.StatusTooManyRequests, "TOO_MANY_REQUESTS", message, err)
+}
+
 // As extracts an *AppError from err, wrapping it as an internal error if it isn't one.
 func As(err error) *AppError {
 	var appErr *AppError

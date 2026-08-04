@@ -13,6 +13,10 @@ type TokenBlacklistRepository interface {
 	// keep the row after that, the token would be rejected on expiry anyway).
 	Add(ctx context.Context, jti string, expiresAt time.Time) error
 	IsBlacklisted(ctx context.Context, jti string) (bool, error)
+	// DeleteExpired removes blacklist rows past their own expiry — once a
+	// token has expired it's rejected on that basis anyway, so the blacklist
+	// row is dead weight. Returns the number of rows removed.
+	DeleteExpired(ctx context.Context) (int64, error)
 }
 
 type tokenBlacklistRepository struct {
@@ -41,4 +45,13 @@ func (r *tokenBlacklistRepository) IsBlacklisted(ctx context.Context, jti string
 		return false, fmt.Errorf("check token blacklist: %w", err)
 	}
 	return exists, nil
+}
+
+func (r *tokenBlacklistRepository) DeleteExpired(ctx context.Context) (int64, error) {
+	const query = `DELETE FROM token_blacklist WHERE expires_at < now()`
+	tag, err := r.db.Exec(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired blacklist tokens: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
