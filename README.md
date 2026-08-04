@@ -83,7 +83,9 @@ bawah) — baris hasil sync otomatis tidak punya actor manusia. `000025` meng-AL
 nambah kolom `production_year` (nullable) — atribut opsional per unit fisik, lihat
 `### /api/products/{productId}/stock-items & /api/stock-items` di bawah. `000026` nambah partial
 unique index di `stock_opnames` supaya cuma boleh ada 1 sesi `status='IN_PROGRESS'` dalam satu
-waktu, lihat `### /api/stock-opnames` di bawah.
+waktu, lihat `### /api/stock-opnames` di bawah. `000027` nambah sequence `stock_items_barcode_seq`
+— barcode `stock_items` pindah dari format `{SKU}-{urut}` (kepanjangan buat label fisik) ke angka
+global 8 digit, lihat `### /api/products/{productId}/stock-items & /api/stock-items` di atas.
 
 Menambah migrasi baru: buat pasangan file
 `migrations/{next_number}_{deskripsi}.up.sql` dan `.down.sql`.
@@ -751,10 +753,18 @@ DELETE /api/stock-items/{id}                   # HARD delete, hanya unit AVAILAB
 - **Validasi create pakai status `422`** (`Unprocessable Entity`), bukan `400` seperti endpoint
   lain — `serial_number`, `condition` (harus `GOOD`/`BAD`), `purchase_price` (harus `> 0`), dan
   `purchase_date` (format `YYYY-MM-DD`) semua wajib diisi & valid, kalau tidak → 422.
-- **Barcode auto-generate**, format `{SKU}-{urut 4 digit}` (mis. SKU produk `BAT-ANT-10-001` →
-  barcode unit pertama `BAT-ANT-10-001-0001`, unit kedua `...-0002`, dst.) — dihitung + insert
-  dalam satu transaksi DB dengan retry (maks 5x) kalau kena unique constraint
-  `uq_stock_items_barcode`, persis pola SKU produk (BE-201) tapi 4 digit, bukan 3.
+- **Barcode auto-generate, 8 digit angka global** (`00000001`, `00000002`, dst., dari sequence DB
+  `stock_items_barcode_seq`, migrasi `000027`) — **bukan** lagi `{SKU}-{urut 4 digit}` seperti
+  sebelumnya. Diganti karena barcode lama (mis. `BAT-UBS-0.5-001-0004`, 21 karakter) kepanjangan
+  buat dicetak & dibaca scanner di label fisik 50×25mm. Angka murni (bukan campur huruf) juga
+  dipilih sengaja: subset-C CODE128 ngepak 2 digit per simbol, jadi barcode-nya makin ringkas
+  secara render dibanding kalau tetap ada prefix huruf. Sequence-nya **global** (lintas produk,
+  bukan per-SKU) dan dijamin unik oleh Postgres sendiri (`nextval`) — tidak perlu retry-on-conflict
+  kayak skema lama, dan barcode sekarang sama sekali tidak mengandung info produk (identitas
+  produk tetap ada lewat field `product` nested di response, bukan di-encode ke barcode-nya).
+  `serial_number` tetap terpisah dan independen (bebas format, cuma wajib unik global lewat
+  `uq_stock_items_serial_number`) — barcode dan serial number dua konsep beda, tidak saling
+  menurunkan nilai satu sama lain.
 - **Create ditolak (400) kalau produknya sudah diarsipkan** (`is_active=false`) — tidak bisa
   nambah stok ke produk yang sudah tidak dijual.
 - **`GET .../stock-items` (list per produk) urut terbaru duluan** (`ORDER BY si.id DESC`) —
@@ -791,7 +801,7 @@ unit yang sudah `SOLD` → 409. Field `condition` selalu ada di response biar kl
 sendiri kalau perlu.
 
 ```bash
-GET /api/stock-items/lookup?barcode=BAT-ANT-10-001-0001&type=SELL
+GET /api/stock-items/lookup?barcode=00000001&type=SELL
 ```
 
 Contoh response (200):
@@ -801,7 +811,7 @@ Contoh response (200):
   "data": {
     "id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
     "product": { "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f", "name": "Emas Batangan 10gr", "weight_gram": 10 },
-    "barcode": "BAT-ANT-10-001-0001",
+    "barcode": "00000001",
     "serial_number": "SN-0001",
     "condition": "BAD",
     "purchase_price": 1000000,
@@ -824,7 +834,7 @@ Contoh response `POST /api/products/{productId}/stock-items` (201):
   "data": {
     "id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
     "product": { "id": "6d9f6a2a-2b0c-4e2b-8f1a-1a2b3c4d5e6f", "name": "Emas Batangan 10gr", "weight_gram": 10 },
-    "barcode": "BAT-ANT-10-001-0001",
+    "barcode": "00000001",
     "serial_number": "SN-0001",
     "condition": "GOOD",
     "purchase_price": 1000000,
@@ -844,7 +854,7 @@ Contoh response `GET /api/stock-items/{id}/label` (200):
 {
   "success": true,
   "data": {
-    "barcode": "BAT-ANT-10-001-0001",
+    "barcode": "00000001",
     "product_name": "Emas Batangan 10gr",
     "weight_gram": 10,
     "serial_number": "SN-0001"
@@ -945,9 +955,9 @@ butuh konfirmasi atau tidak sebelum checkout — tapi validasi ini tetap dipaksa
 saat `POST`, klien tidak pernah dipercaya begitu saja buat hal finansial begini.
 
 **Khusus `BUY`** (BE-801):
-- Tiap item bikin baris `stock_items` baru: `status=AVAILABLE`, `barcode` auto-generate (format
-  `{SKU}-{urut 4 digit}` sama seperti BE-501, dihitung ulang per item — kalau 2 item di satu
-  request sama-sama merujuk produk yang sama, barcode-nya tetap urut `-0001`/`-0002`),
+- Tiap item bikin baris `stock_items` baru: `status=AVAILABLE`, `barcode` auto-generate (8 digit
+  angka dari `stock_items_barcode_seq`, sama pola global dengan BE-501 — lihat
+  `### /api/products/{productId}/stock-items & /api/stock-items` di atas — bukan lagi per-SKU),
   `purchase_price` = `price_total` yang diinput (jadi modal unit itu buat laporan margin nanti),
   `purchase_date` = hari ini (server yang isi, bukan field request).
 - `serial_number` **wajib** dan **unik** — baik terhadap unit yang sudah ada di DB
@@ -1009,7 +1019,7 @@ Contoh response `SELL` (201):
       {
         "id": "3c4d5e6f-7081-9012-cdef-012345678901",
         "stock_item_id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
-        "barcode": "BAT-ANT-10-001-0001",
+        "barcode": "00000001",
         "serial_number": "SN-0001",
         "product_name": "Emas Batangan 10gr",
         "weight_gram": 10,
@@ -1040,7 +1050,7 @@ Contoh response `BUY` (201) — unit barunya langsung `AVAILABLE`:
       {
         "id": "5e6f7081-9203-4415-ef01-234567890123",
         "stock_item_id": "6f708192-0334-5526-f012-345678901234",
-        "barcode": "BAT-ANT-10-001-0002",
+        "barcode": "00000002",
         "serial_number": "SN-BUYBACK-01",
         "product_name": "Emas Batangan 10gr",
         "weight_gram": 10,
@@ -1153,9 +1163,9 @@ item** — tiap objek di `serials[]` punya `serial_number` **dan** `condition` s
 (`{"serial_number": "...", "condition": "GOOD", "production_year": 2024}` — `production_year`
 opsional per serial, sama pola & validasi dengan BE-501/BE-801), karena satu shipment/PO tidak
 dijamin semua unitnya seragam kondisinya maupun tahun produksinya (bisa campur dalam satu produk
-yang sama). Untuk tiap serial: satu `stock_items` baru (`status=AVAILABLE`, `barcode`
-auto-generate pola `{SKU}-{urut 4 digit}` sama seperti BE-501/BE-801, `purchase_price` diambil
-dari PO — **bukan** dari request receive, `po_id`/`supplier_id` ikut terisi di unit itu — pertama
+yang sama). Untuk tiap serial: satu `stock_items` baru (`status=AVAILABLE`, `barcode` auto-generate
+8 digit angka dari `stock_items_barcode_seq`, sama pola global dengan BE-501/BE-801,
+`purchase_price` diambil dari PO — **bukan** dari request receive, `po_id`/`supplier_id` ikut terisi di unit itu — pertama
 kalinya kedua kolom ini kepakai, sebelumnya selalu `NULL` baik dari create-stock-item langsung
 (BE-501) maupun buyback (BE-801)). Semuanya atomik dalam satu transaksi DB, PO row di-lock
 (`FOR UPDATE`) selama
@@ -1243,7 +1253,7 @@ Contoh response `POST /api/purchase-orders/{id}/receive` (200) — `status`/`rec
     "received_units": [
       {
         "stock_item_id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
-        "barcode": "BAT-ANT-10-001-0001",
+        "barcode": "00000001",
         "product_name": "Emas Batangan 10gr",
         "serial_number": "PO-SN-1",
         "condition": "GOOD",
@@ -1251,7 +1261,7 @@ Contoh response `POST /api/purchase-orders/{id}/receive` (200) — `status`/`rec
       },
       {
         "stock_item_id": "2b3c4d5e-6f70-8901-bcde-f01234567890",
-        "barcode": "BAT-ANT-10-001-0002",
+        "barcode": "00000002",
         "product_name": "Emas Batangan 10gr",
         "serial_number": "PO-SN-2",
         "condition": "BAD",
@@ -1390,7 +1400,7 @@ Contoh response `POST /api/stock-opnames/{id}/complete` (200):
       {
         "id": "8b9c0d1e-2f34-5678-90ab-cdef12345678",
         "stock_item_id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
-        "barcode": "BAT-ANT-10-001-0001",
+        "barcode": "00000001",
         "product_name": "Emas Batangan 10gr",
         "system_status": "AVAILABLE",
         "physical_status": "FOUND",
@@ -1399,7 +1409,7 @@ Contoh response `POST /api/stock-opnames/{id}/complete` (200):
       {
         "id": "9c0d1e2f-3456-7890-abcd-ef1234567890",
         "stock_item_id": "2b3c4d5e-6f78-9012-bcde-f12345678901",
-        "barcode": "BAT-ANT-10-001-0002",
+        "barcode": "00000002",
         "product_name": "Emas Batangan 10gr",
         "system_status": "AVAILABLE",
         "physical_status": "NOT_FOUND",
@@ -1902,8 +1912,8 @@ Dua lapis test:
 **`stock_items_test.go`** — `/api/products/{productId}/stock-items` & `/api/stock-items`
 (BE-501 create, BE-502 list/detail, BE-503 update, BE-504 hard delete, BE-505 label)
 - `POST` (ADMIN & SUPER_ADMIN): tanpa token → 401; role KASIR → 403
-- Create → `barcode == "{SKU}-0001"`, `status == "AVAILABLE"`; dua unit di produk yang sama →
-  barcode kedua `...-0002` (urut naik, sama pola dengan SKU produk)
+- Create → `barcode` 8 digit angka (`nextval('stock_items_barcode_seq')`), `status == "AVAILABLE"`;
+  dua unit (produk sama maupun beda) → barcode berbeda & naik terus, bukan lagi per-produk
 - `serial_number` kosong / `condition` kosong atau bukan `GOOD`/`BAD` / `purchase_price <= 0` /
   `purchase_date` kosong atau format salah → **422** (bukan 400 — status code baru khusus
   validasi field stock item)

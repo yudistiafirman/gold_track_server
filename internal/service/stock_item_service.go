@@ -157,8 +157,6 @@ func (s *stockItemService) Create(ctx context.Context, input CreateStockItemInpu
 		return StockItemSummary{}, apperror.Internal("failed to resolve acting user", err)
 	}
 
-	barcodePrefix := product.SKU + "-"
-
 	stockItem := &model.StockItem{
 		ProductID:      product.ID,
 		SerialNumber:   serialNumber,
@@ -171,7 +169,7 @@ func (s *stockItemService) Create(ctx context.Context, input CreateStockItemInpu
 		CreatedBy:      creator.ID,
 	}
 
-	created, err := s.stockItemRepo.CreateWithGeneratedBarcode(ctx, stockItem, barcodePrefix)
+	created, err := s.stockItemRepo.CreateWithGeneratedBarcode(ctx, stockItem)
 	if err != nil {
 		if errors.Is(err, repository.ErrSerialNumberTaken) {
 			return StockItemSummary{}, apperror.Conflict("serial_number sudah dipakai", nil)

@@ -368,19 +368,17 @@ func (r *transactionRepository) tryBuy(ctx context.Context, input CreateBuyInput
 	purchaseDate := time.Now()
 
 	for _, item := range input.Items {
-		var sku, productName string
+		var productName string
 		var weightGram float64
-		if err := tx.QueryRow(ctx, `SELECT sku, name, weight_gram::float8 FROM products WHERE id = $1`, item.ProductID).
-			Scan(&sku, &productName, &weightGram); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT name, weight_gram::float8 FROM products WHERE id = $1`, item.ProductID).
+			Scan(&productName, &weightGram); err != nil {
 			return nil, nil, fmt.Errorf("fetch product for buy item: %w", err)
 		}
 
-		barcodePrefix := sku + "-"
-		var count int
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM stock_items WHERE barcode LIKE $1`, barcodePrefix+"%").Scan(&count); err != nil {
-			return nil, nil, fmt.Errorf("count stock items by barcode prefix: %w", err)
+		barcode, err := nextStockItemBarcode(ctx, tx)
+		if err != nil {
+			return nil, nil, err
 		}
-		barcode := fmt.Sprintf("%s%04d", barcodePrefix, count+1)
 
 		const insertStockItemQuery = `
 			INSERT INTO stock_items (product_id, barcode, serial_number, condition, purchase_price, purchase_date, production_year, status, created_by)

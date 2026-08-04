@@ -363,18 +363,11 @@ func (r *purchaseOrderRepository) tryReceive(ctx context.Context, poPublicID str
 			Scan(&purchasePrice); err != nil {
 			return nil, fmt.Errorf("fetch po item purchase price: %w", err)
 		}
-		var sku string
-		if err := tx.QueryRow(ctx, `SELECT sku FROM products WHERE id = $1`, item.ProductID).Scan(&sku); err != nil {
-			return nil, fmt.Errorf("fetch product sku: %w", err)
-		}
-		barcodePrefix := sku + "-"
-
 		for _, serial := range item.Serials {
-			var count int
-			if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM stock_items WHERE barcode LIKE $1`, barcodePrefix+"%").Scan(&count); err != nil {
-				return nil, fmt.Errorf("count stock items by barcode prefix: %w", err)
+			barcode, err := nextStockItemBarcode(ctx, tx)
+			if err != nil {
+				return nil, err
 			}
-			barcode := fmt.Sprintf("%s%04d", barcodePrefix, count+1)
 
 			unit := model.StockItem{
 				ProductID:      item.ProductID,
@@ -388,7 +381,7 @@ func (r *purchaseOrderRepository) tryReceive(ctx context.Context, poPublicID str
 				Status:         "AVAILABLE",
 				CreatedBy:      input.CreatedBy,
 			}
-			err := tx.QueryRow(ctx, insertStockItemQuery,
+			err = tx.QueryRow(ctx, insertStockItemQuery,
 				unit.ProductID, barcode, unit.SerialNumber, unit.Condition, unit.PurchasePrice,
 				unit.PurchaseDate, unit.ProductionYear, unit.POID, unit.SupplierID, unit.CreatedBy,
 			).Scan(&unit.ID, &unit.PublicID, &unit.CreatedAt, &unit.UpdatedAt)

@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"net/http"
+	"regexp"
 	"testing"
 )
 
@@ -81,6 +82,19 @@ func markStockItemSold(t *testing.T, publicID string) {
 
 const nonexistentUUID = "00000000-0000-0000-0000-000000000000"
 
+// barcodePattern matches the short, scanner-friendly generated barcode
+// format (8-digit zero-padded value of stock_items_barcode_seq) — no
+// longer SKU-prefixed (that made physical labels unreadable), so tests
+// assert shape/uniqueness/ordering instead of a literal expected value.
+var barcodePattern = regexp.MustCompile(`^\d{8}$`)
+
+func assertValidGeneratedBarcode(t *testing.T, barcode string) {
+	t.Helper()
+	if !barcodePattern.MatchString(barcode) {
+		t.Fatalf("expected an 8-digit generated barcode, got %q", barcode)
+	}
+}
+
 // --- BE-501: create ---
 
 func TestStockItems_CreateRequiresAuth(t *testing.T) {
@@ -115,10 +129,7 @@ func TestStockItems_CreateGeneratesBarcode(t *testing.T) {
 	}
 	var created stockItemDTO
 	decodeData(t, resp, &created)
-	expectedBarcode := product.SKU + "-0001"
-	if created.Barcode != expectedBarcode {
-		t.Fatalf("expected barcode %q, got %q", expectedBarcode, created.Barcode)
-	}
+	assertValidGeneratedBarcode(t, created.Barcode)
 	if created.Status != "AVAILABLE" {
 		t.Fatalf("expected status AVAILABLE, got %q", created.Status)
 	}
@@ -160,7 +171,12 @@ func TestStockItems_CreateInvalidProductionYear(t *testing.T) {
 	}
 }
 
-func TestStockItems_BarcodeIncrementsForSameProduct(t *testing.T) {
+// TestStockItems_BarcodeIsGlobalSequenceNotPerProduct covers the barcode
+// generator's move off SKU-prefixed-per-product counting (too long to
+// render on a 50x25mm physical label) to a bare global sequence: two units
+// of the *same* product get distinct, monotonically increasing barcodes
+// with no shared prefix.
+func TestStockItems_BarcodeIsGlobalSequenceNotPerProduct(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
@@ -169,11 +185,13 @@ func TestStockItems_BarcodeIncrementsForSameProduct(t *testing.T) {
 	first := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "SN-0001"}))
 	second := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "SN-0002"}))
 
-	if first.Barcode != product.SKU+"-0001" {
-		t.Fatalf("expected first barcode %s-0001, got %q", product.SKU, first.Barcode)
+	assertValidGeneratedBarcode(t, first.Barcode)
+	assertValidGeneratedBarcode(t, second.Barcode)
+	if first.Barcode == second.Barcode {
+		t.Fatalf("expected distinct barcodes, both were %q", first.Barcode)
 	}
-	if second.Barcode != product.SKU+"-0002" {
-		t.Fatalf("expected second barcode %s-0002, got %q", product.SKU, second.Barcode)
+	if second.Barcode <= first.Barcode {
+		t.Fatalf("expected second barcode > first (monotonic sequence), got first=%q second=%q", first.Barcode, second.Barcode)
 	}
 }
 

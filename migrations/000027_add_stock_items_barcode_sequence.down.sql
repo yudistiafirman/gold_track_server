@@ -1,0 +1,1 @@
+DROP SEQUENCE stock_items_barcode_seq;

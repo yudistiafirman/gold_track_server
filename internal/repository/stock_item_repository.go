@@ -40,6 +40,20 @@ const uqStockItemsSerialNumber = "uq_stock_items_serial_number"
 
 const createStockItemMaxAttempts = 5
 
+// nextStockItemBarcode draws the next value of stock_items_barcode_seq
+// (migration 000027) and formats it as an 8-digit zero-padded decimal
+// string — short enough to render legibly as CODE128 on a 50x25mm label,
+// and digits-only so CODE128's C subset packs it even tighter than mixed
+// alphanumeric would. A plain sequence needs no locking and can't collide
+// under concurrency, unlike the old SKU-prefixed COUNT-then-insert scheme.
+func nextStockItemBarcode(ctx context.Context, tx pgx.Tx) (string, error) {
+	var seq int64
+	if err := tx.QueryRow(ctx, `SELECT nextval('stock_items_barcode_seq')`).Scan(&seq); err != nil {
+		return "", fmt.Errorf("draw next stock item barcode: %w", err)
+	}
+	return fmt.Sprintf("%08d", seq), nil
+}
+
 // StockItemWithRefs is a stock item joined with its product's identity —
 // list/detail/label views need the product name/weight, not just the
 // internal FK, without a second round trip per row.
@@ -72,11 +86,16 @@ const stockItemWithRefsFrom = `
 `
 
 type StockItemRepository interface {
-	// CreateWithGeneratedBarcode counts existing stock items sharing
-	// barcodePrefix, appends a zero-padded sequence number, and inserts —
-	// retrying the whole count+insert unit on a concurrent unique-violation
-	// race.
-	CreateWithGeneratedBarcode(ctx context.Context, s *model.StockItem, barcodePrefix string) (*model.StockItem, error)
+	// CreateWithGeneratedBarcode assigns the unit a short, scanner-friendly
+	// barcode (8-digit zero-padded value of stock_items_barcode_seq — a
+	// plain DB sequence, so it's race-safe by construction and never needs
+	// a retry) and inserts. Deliberately independent of SKU/product: the
+	// barcode used to be SKU-prefixed but that made it too long to render
+	// legibly on small (50x25mm) physical labels — see BE ticket "barcode
+	// too long for label" — so it's now a bare global counter. Product
+	// identity is still available via the FindBy*'s joined product ref, not
+	// encoded into the barcode itself.
+	CreateWithGeneratedBarcode(ctx context.Context, s *model.StockItem) (*model.StockItem, error)
 	// FindByPublicID looks up a stock item regardless of status.
 	FindByPublicID(ctx context.Context, publicID string) (*StockItemWithRefs, error)
 	// FindByBarcode looks up a stock item regardless of status — mirrors
@@ -104,9 +123,9 @@ func NewStockItemRepository(db *pgxpool.Pool) StockItemRepository {
 	return &stockItemRepository{db: db}
 }
 
-func (r *stockItemRepository) CreateWithGeneratedBarcode(ctx context.Context, s *model.StockItem, barcodePrefix string) (*model.StockItem, error) {
+func (r *stockItemRepository) CreateWithGeneratedBarcode(ctx context.Context, s *model.StockItem) (*model.StockItem, error) {
 	for i := 0; i < createStockItemMaxAttempts; i++ {
-		created, err := r.tryCreate(ctx, s, barcodePrefix)
+		created, err := r.tryCreate(ctx, s)
 		if err == nil {
 			return created, nil
 		}
@@ -118,18 +137,17 @@ func (r *stockItemRepository) CreateWithGeneratedBarcode(ctx context.Context, s 
 	return nil, ErrBarcodeGenerationFailed
 }
 
-func (r *stockItemRepository) tryCreate(ctx context.Context, s *model.StockItem, barcodePrefix string) (*model.StockItem, error) {
+func (r *stockItemRepository) tryCreate(ctx context.Context, s *model.StockItem) (*model.StockItem, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	var count int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM stock_items WHERE barcode LIKE $1`, barcodePrefix+"%").Scan(&count); err != nil {
-		return nil, fmt.Errorf("count stock items by barcode prefix: %w", err)
+	barcode, err := nextStockItemBarcode(ctx, tx)
+	if err != nil {
+		return nil, err
 	}
-	barcode := fmt.Sprintf("%s%04d", barcodePrefix, count+1)
 
 	const insertQuery = `
 		INSERT INTO stock_items (product_id, barcode, serial_number, condition, purchase_price, purchase_date, production_year, status, notes, created_by)

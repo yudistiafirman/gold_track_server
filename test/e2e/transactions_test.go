@@ -437,13 +437,10 @@ func TestTransactions_CreateBuyFromCustomer(t *testing.T) {
 	if item.PricePerGram != 90000 {
 		t.Fatalf("expected price_per_gram=90000, got %v", item.PricePerGram)
 	}
-	if item.StockItemID == "" || item.Barcode == "" {
-		t.Fatalf("expected stock_item_id/barcode populated, got %+v", item)
+	if item.StockItemID == "" {
+		t.Fatalf("expected stock_item_id populated, got %+v", item)
 	}
-	expectedBarcode := product.SKU + "-0001"
-	if item.Barcode != expectedBarcode {
-		t.Fatalf("expected barcode %q, got %q", expectedBarcode, item.Barcode)
-	}
+	assertValidGeneratedBarcode(t, item.Barcode)
 
 	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+item.StockItemID, nil, adminToken)
 	if status != http.StatusOK {
@@ -493,7 +490,7 @@ func TestTransactions_BuyWithProductionYear(t *testing.T) {
 	}
 }
 
-func TestTransactions_BuyMultipleItemsSameProductGetsSequentialBarcodes(t *testing.T) {
+func TestTransactions_BuyMultipleItemsSameProductGetsDistinctBarcodes(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
@@ -512,8 +509,10 @@ func TestTransactions_BuyMultipleItemsSameProductGetsSequentialBarcodes(t *testi
 	if len(tx.Items) != 2 {
 		t.Fatalf("expected 2 items, got %d", len(tx.Items))
 	}
-	if tx.Items[0].Barcode != product.SKU+"-0001" || tx.Items[1].Barcode != product.SKU+"-0002" {
-		t.Fatalf("expected sequential barcodes -0001/-0002, got %q / %q", tx.Items[0].Barcode, tx.Items[1].Barcode)
+	assertValidGeneratedBarcode(t, tx.Items[0].Barcode)
+	assertValidGeneratedBarcode(t, tx.Items[1].Barcode)
+	if tx.Items[0].Barcode == tx.Items[1].Barcode {
+		t.Fatalf("expected distinct barcodes for the 2 items, both were %q", tx.Items[0].Barcode)
 	}
 }
 
