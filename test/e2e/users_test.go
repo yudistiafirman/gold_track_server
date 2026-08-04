@@ -56,7 +56,7 @@ func TestUsers_CreateListGetUpdateDelete(t *testing.T) {
 	status, resp := doRequest(t, http.MethodPost, "/api/users/", map[string]string{
 		"name":     "Kasir Baru",
 		"email":    "kasir-crud@e2e.test",
-		"password": "KasirPassword123",
+		"password": "KasirPassword123!",
 		"role":     "KASIR",
 	}, adminToken)
 	if status != http.StatusCreated {
@@ -115,7 +115,7 @@ func TestUsers_CreateListGetUpdateDelete(t *testing.T) {
 
 	status, _ = doRequest(t, http.MethodPost, "/api/auth/login", map[string]string{
 		"email":    "kasir-crud@e2e.test",
-		"password": "KasirPassword123",
+		"password": "KasirPassword123!",
 	}, "")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("expected deactivated user login to fail with 401, got %d", status)
@@ -130,7 +130,7 @@ func TestUsers_CreateDuplicateEmailConflict(t *testing.T) {
 	body := map[string]string{
 		"name":     "Dup",
 		"email":    "dup@e2e.test",
-		"password": "Password123",
+		"password": "Password123!",
 		"role":     "KASIR",
 	}
 	if status, _ := doRequest(t, http.MethodPost, "/api/users/", body, adminToken); status != http.StatusCreated {
@@ -140,6 +140,97 @@ func TestUsers_CreateDuplicateEmailConflict(t *testing.T) {
 	status, resp := doRequest(t, http.MethodPost, "/api/users/", body, adminToken)
 	if status != http.StatusConflict {
 		t.Fatalf("expected 409, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestUsers_CreatePasswordTooShort(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "SUPER_ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodPost, "/api/users/", map[string]string{
+		"name": "Test", "email": "short@e2e.test", "password": "Ab1!ab", "role": "KASIR",
+	}, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestUsers_CreatePasswordMissingComplexity(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "SUPER_ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	cases := []string{
+		"alllowercase1!",  // no uppercase
+		"ALLUPPERCASE1!",  // no lowercase
+		"NoDigitsHere!!",  // no digit
+		"NoSymbolHere123", // no symbol
+	}
+	for _, pw := range cases {
+		status, resp := doRequest(t, http.MethodPost, "/api/users/", map[string]string{
+			"name": "Test", "email": "complexity-" + pw + "@e2e.test", "password": pw, "role": "KASIR",
+		}, adminToken)
+		if status != http.StatusBadRequest {
+			t.Fatalf("password %q: expected 400, got %d (resp=%+v)", pw, status, resp)
+		}
+	}
+}
+
+func TestUsers_CreatePasswordCommonWeakRejected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "SUPER_ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodPost, "/api/users/", map[string]string{
+		"name": "Test", "email": "weak@e2e.test", "password": "P@ssw0rd!", "role": "KASIR",
+	}, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for common weak password, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestUsers_CreatePasswordMeetingAllRulesSucceeds(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "SUPER_ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodPost, "/api/users/", map[string]string{
+		"name": "Test", "email": "strong@e2e.test", "password": "Br1ght-Falcon#42", "role": "KASIR",
+	}, adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestUsers_UpdatePasswordEnforcesSameRules(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "SUPER_ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodPost, "/api/users/", map[string]string{
+		"name": "Test", "email": "update-pw@e2e.test", "password": "Br1ght-Falcon#42", "role": "KASIR",
+	}, adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var created userDTO
+	decodeData(t, resp, &created)
+
+	status, resp = doRequest(t, http.MethodPut, "/api/users/"+created.ID, map[string]any{
+		"name": "Test", "email": "update-pw@e2e.test", "role": "KASIR", "is_active": true,
+		"password": "nocomplexity",
+	}, adminToken)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for weak new password on update, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodPut, "/api/users/"+created.ID, map[string]any{
+		"name": "Test", "email": "update-pw@e2e.test", "role": "KASIR", "is_active": true,
+		"password": "",
+	}, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 when password left empty (keep existing), got %d (resp=%+v)", status, resp)
 	}
 }
 

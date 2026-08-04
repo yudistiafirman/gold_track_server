@@ -205,12 +205,36 @@ Contoh response error:
 
 // 400 — {id} bukan format UUID
 {"success":false,"error":{"code":"BAD_REQUEST","message":"id tidak valid"}}
+
+// 400 — password kurang dari 8 karakter
+{"success":false,"error":{"code":"BAD_REQUEST","message":"password minimal 8 karakter"}}
+
+// 400 — password tidak punya kombinasi huruf besar/kecil/angka/simbol lengkap
+{"success":false,"error":{"code":"BAD_REQUEST","message":"password harus mengandung kombinasi huruf besar, huruf kecil, angka, dan simbol"}}
+
+// 400 — password ada di denylist password umum/lemah
+{"success":false,"error":{"code":"BAD_REQUEST","message":"password terlalu umum/mudah ditebak, gunakan kombinasi lain"}}
 ```
+
+**Aturan password** (`validatePassword`, `internal/service/user_service.go`), berlaku di `POST`
+(wajib) maupun `PUT` (kalau field `password` diisi):
+- Minimal 8 karakter.
+- Wajib kombinasi lengkap: huruf besar, huruf kecil, angka, **dan** simbol (karakter non-huruf/angka)
+  — kalau ada salah satu kategori yang hilang, ditolak 400.
+- Ditolak juga (400) kalau persis cocok (case-insensitive) dengan salah satu password umum/lemah di
+  denylist bawaan (`commonWeakPasswords`) — mis. `password123`, `qwerty123!`, `p@ssw0rd!`,
+  `12345678`, dst. Ini denylist statis, **bukan** pengecekan ke database breach eksternal (supaya
+  password user tidak pernah keluar/dikirim ke pihak ketiga).
+- Password admin dari seeder (`cmd/seed`, env `SEED_ADMIN_PASSWORD`) **tidak** lewat validasi ini
+  — seeder insert langsung ke DB, bukan lewat `userService.Create` — jadi kalau nanti diganti nilai
+  default/env-nya ke sesuatu yang lebih lemah, seeder tetap jalan (baru kena aturan ini pas
+  direset lewat `PUT /api/users/{id}` dari aplikasi).
 
 Catatan:
 - `password` di response **tidak pernah** dikembalikan.
 - `email` unik — konflik → 409.
-- `password` di `PUT` opsional; kosongkan untuk mempertahankan password lama.
+- `password` di `PUT` opsional; kosongkan untuk mempertahankan password lama (aturan di atas cuma
+  dicek kalau field-nya diisi non-kosong).
 - `DELETE` adalah **soft delete** (`is_active=false`), bukan hapus baris — semua tabel lain
   referensi `users.id` lewat FK tanpa `ON DELETE CASCADE`, jadi hard delete akan gagal begitu
   user itu pernah membuat data apa pun. Reaktivasi lewat `PUT` dengan `is_active: true`.

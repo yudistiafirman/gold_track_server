@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -14,6 +15,59 @@ import (
 )
 
 const minPasswordLength = 8
+
+// commonWeakPasswords is a curated denylist of well-known weak passwords and
+// patterns (checked case-insensitively) — not a full breached-password
+// database (that would need an external lookup, which also means shipping
+// the user's password off-server), just a defense-in-depth net for the most
+// obvious choices that would otherwise pass the complexity check below.
+var commonWeakPasswords = map[string]struct{}{
+	"password": {}, "password1": {}, "password12": {}, "password123": {}, "password1234": {},
+	"passw0rd": {}, "passw0rd!": {}, "p@ssword": {}, "p@ssw0rd": {}, "p@ssw0rd!": {},
+	"admin123": {}, "admin1234": {}, "admin@123": {}, "adminadmin": {}, "adminpassword": {},
+	"qwerty123": {}, "qwertyui": {}, "qwerty1234": {}, "qwertyuiop": {}, "qwerty123!": {},
+	"welcome123": {}, "welcome1!": {}, "welcome@123": {},
+	"letmein123": {}, "letmein1!": {},
+	"iloveyou123": {}, "iloveyou1!": {},
+	"12345678": {}, "123456789": {}, "1234567890": {}, "12341234": {}, "123123123": {},
+	"11111111": {}, "00000000": {}, "87654321": {},
+	"changeme": {}, "changeme1": {}, "changeme123": {}, "changeme123!": {},
+	"trustno1": {}, "dragon123": {}, "monkey123": {}, "football123": {}, "baseball123": {},
+	"abc12345": {}, "a1b2c3d4": {},
+}
+
+// validatePassword enforces (in order): minimum length, character-class
+// complexity (upper/lower/digit/symbol all required), and rejection of
+// well-known weak passwords — same 400 tier as other user-field validation
+// (this is a request-shape rule, not a stock-unit-creation field).
+func validatePassword(password string) error {
+	if len(password) < minPasswordLength {
+		return apperror.BadRequest("password minimal 8 karakter", nil)
+	}
+
+	var hasUpper, hasLower, hasDigit, hasSymbol bool
+	for _, r := range password {
+		switch {
+		case unicode.IsUpper(r):
+			hasUpper = true
+		case unicode.IsLower(r):
+			hasLower = true
+		case unicode.IsDigit(r):
+			hasDigit = true
+		default:
+			hasSymbol = true
+		}
+	}
+	if !hasUpper || !hasLower || !hasDigit || !hasSymbol {
+		return apperror.BadRequest("password harus mengandung kombinasi huruf besar, huruf kecil, angka, dan simbol", nil)
+	}
+
+	if _, weak := commonWeakPasswords[strings.ToLower(password)]; weak {
+		return apperror.BadRequest("password terlalu umum/mudah ditebak, gunakan kombinasi lain", nil)
+	}
+
+	return nil
+}
 
 var allowedRoles = map[string]struct{}{
 	"SUPER_ADMIN": {},
@@ -77,8 +131,8 @@ func (s *userService) Create(ctx context.Context, input CreateUserInput) (UserSu
 	if err := validateUserFields(input.Name, input.Email, input.Role); err != nil {
 		return UserSummary{}, err
 	}
-	if len(input.Password) < minPasswordLength {
-		return UserSummary{}, apperror.BadRequest("password minimal 8 karakter", nil)
+	if err := validatePassword(input.Password); err != nil {
+		return UserSummary{}, err
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
@@ -147,8 +201,8 @@ func (s *userService) Update(ctx context.Context, input UpdateUserInput) (UserSu
 
 	passwordHash := existing.PasswordHash
 	if input.Password != "" {
-		if len(input.Password) < minPasswordLength {
-			return UserSummary{}, apperror.BadRequest("password minimal 8 karakter", nil)
+		if err := validatePassword(input.Password); err != nil {
+			return UserSummary{}, err
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 		if err != nil {
