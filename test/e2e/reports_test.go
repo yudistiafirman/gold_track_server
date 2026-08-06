@@ -61,13 +61,20 @@ func TestReports_RequireAuth(t *testing.T) {
 func TestReports_NonAdminForbidden(t *testing.T) {
 	resetDB(t)
 	kasir := seedUser(t, "KASIR", true)
-	token := login(t, kasir.Email, kasir.Password)
+	kasirToken := login(t, kasir.Email, kasir.Password)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
 
 	paths := []string{"/api/reports/transactions", "/api/reports/stock", "/api/reports/finance"}
 	for _, p := range paths {
-		status, resp := doRequest(t, http.MethodGet, p, nil, token)
-		if status != http.StatusForbidden {
-			t.Errorf("%s: expected 403, got %d (resp=%+v)", p, status, resp)
+		for _, tc := range []struct {
+			role  string
+			token string
+		}{{"KASIR", kasirToken}, {"ADMIN", adminToken}} {
+			status, resp := doRequest(t, http.MethodGet, p, nil, tc.token)
+			if status != http.StatusForbidden {
+				t.Errorf("%s as %s: expected 403, got %d (resp=%+v)", p, tc.role, status, resp)
+			}
 		}
 	}
 }
@@ -78,6 +85,8 @@ func TestReports_TransactionsBreakdownAllTypes(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken) // weight_gram = 10
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 	supplier := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
@@ -108,7 +117,7 @@ func TestReports_TransactionsBreakdownAllTypes(t *testing.T) {
 		t.Fatalf("sell_supplier: expected 201, got %d (resp=%+v)", status, resp)
 	}
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/transactions", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/transactions", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -138,6 +147,8 @@ func TestReports_TransactionsFilterByType(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 	sellItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
@@ -155,7 +166,7 @@ func TestReports_TransactionsFilterByType(t *testing.T) {
 		t.Fatalf("buy: expected 201, got %d (resp=%+v)", status, resp)
 	}
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/transactions?type=SELL", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/transactions?type=SELL", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -168,10 +179,10 @@ func TestReports_TransactionsFilterByType(t *testing.T) {
 
 func TestReports_TransactionsInvalidType(t *testing.T) {
 	resetDB(t)
-	admin := seedUser(t, "ADMIN", true)
-	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 
-	status, resp := doRequest(t, http.MethodGet, "/api/reports/transactions?type=INVALID", nil, adminToken)
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/transactions?type=INVALID", nil, superAdminToken)
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
 	}
@@ -181,6 +192,8 @@ func TestReports_TransactionsFilterByDateRange(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 
@@ -206,7 +219,7 @@ func TestReports_TransactionsFilterByDateRange(t *testing.T) {
 	decodeData(t, resp, &outOfRangeTx)
 	setTransactionCreatedAt(t, outOfRangeTx.ID, time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC))
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/transactions?from=2026-07-01&to=2026-07-31", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/transactions?from=2026-07-01&to=2026-07-31", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -220,10 +233,10 @@ func TestReports_TransactionsFilterByDateRange(t *testing.T) {
 
 func TestReports_TransactionsBadDateFormat(t *testing.T) {
 	resetDB(t)
-	admin := seedUser(t, "ADMIN", true)
-	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 
-	status, resp := doRequest(t, http.MethodGet, "/api/reports/transactions?from=01-07-2026", nil, adminToken)
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/transactions?from=01-07-2026", nil, superAdminToken)
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
 	}
@@ -263,6 +276,8 @@ func TestReports_StockBreakdownGoodBad(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 
 	createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "RPT-STOCK-1", "condition": "GOOD"}))
@@ -272,7 +287,7 @@ func TestReports_StockBreakdownGoodBad(t *testing.T) {
 	markStockItemSold(t, soldItem.ID)
 	_ = badItem
 
-	status, resp := doRequest(t, http.MethodGet, "/api/reports/stock", nil, adminToken)
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/stock", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -292,11 +307,13 @@ func TestReports_StockZeroStockProductStillAppears(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	category := createCategory(t, adminToken, "Cincin")
 	brand := createBrand(t, adminToken, "Antam")
 	product := createProduct(t, adminToken, "Cincin Emas 5gr", category.ID, brand.ID, 5)
 
-	status, resp := doRequest(t, http.MethodGet, "/api/reports/stock", nil, adminToken)
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/stock", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -316,6 +333,8 @@ func TestReports_StockArchivedProductExcluded(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 
 	// Archiving is guarded against AVAILABLE stock (BE-204), so this
@@ -325,7 +344,7 @@ func TestReports_StockArchivedProductExcluded(t *testing.T) {
 		t.Fatalf("archive product: expected 200, got %d (resp=%+v)", status, resp)
 	}
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/stock", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/stock", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -341,12 +360,14 @@ func TestReports_StockThresholdOverride(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	for i := 0; i < 3; i++ {
 		createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "RPT-THRESH-" + string(rune('A'+i))}))
 	}
 
-	status, resp := doRequest(t, http.MethodGet, "/api/reports/stock", nil, adminToken)
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/stock", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -360,7 +381,7 @@ func TestReports_StockThresholdOverride(t *testing.T) {
 		t.Fatalf("expected low_stock=true with 3 available <= default threshold 5, got %+v", item)
 	}
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/stock?threshold=2", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/stock?threshold=2", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -429,6 +450,8 @@ func TestReports_FinanceGrossProfitIncludesSellSupplier(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 	supplier := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
@@ -454,7 +477,7 @@ func TestReports_FinanceGrossProfitIncludesSellSupplier(t *testing.T) {
 		t.Fatalf("sell_supplier: expected 201, got %d (resp=%+v)", status, resp)
 	}
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -488,6 +511,8 @@ func TestReports_FinanceGrossProfitExcludesBuy(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 
@@ -498,7 +523,7 @@ func TestReports_FinanceGrossProfitExcludesBuy(t *testing.T) {
 		t.Fatalf("buy: expected 201, got %d (resp=%+v)", status, resp)
 	}
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -520,6 +545,8 @@ func TestReports_FinanceNetProfitIncludesExpenses(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 	sellItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
@@ -534,7 +561,7 @@ func TestReports_FinanceNetProfitIncludesExpenses(t *testing.T) {
 	category := createExpenseCategory(t, adminToken, "Listrik")
 	createExpenseAPI(t, adminToken, validExpenseBody(category.ID, map[string]any{"amount": 200000}))
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -557,6 +584,8 @@ func TestReports_FinanceExpenseBreakdownGroupsByCategory(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 
 	listrik := createExpenseCategory(t, adminToken, "Listrik")
 	gaji := createExpenseCategory(t, adminToken, "Gaji Karyawan")
@@ -565,7 +594,7 @@ func TestReports_FinanceExpenseBreakdownGroupsByCategory(t *testing.T) {
 	createExpenseAPI(t, adminToken, validExpenseBody(listrik.ID, map[string]any{"amount": 50000}))
 	createExpenseAPI(t, adminToken, validExpenseBody(gaji.ID, map[string]any{"amount": 3000000}))
 
-	status, resp := doRequest(t, http.MethodGet, "/api/reports/finance", nil, adminToken)
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/finance", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -592,10 +621,12 @@ func TestReports_FinanceMarginPercentZeroWhenNoSales(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	category := createExpenseCategory(t, adminToken, "Sewa Tempat")
 	createExpenseAPI(t, adminToken, validExpenseBody(category.ID, map[string]any{"amount": 500000}))
 
-	status, resp := doRequest(t, http.MethodGet, "/api/reports/finance", nil, adminToken)
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/finance", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -617,6 +648,8 @@ func TestReports_FinanceFilterByDateRange(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 
@@ -646,7 +679,7 @@ func TestReports_FinanceFilterByDateRange(t *testing.T) {
 	createExpenseAPI(t, adminToken, validExpenseBody(category.ID, map[string]any{"amount": 100000, "expense_date": "2026-07-10"}))
 	createExpenseAPI(t, adminToken, validExpenseBody(category.ID, map[string]any{"amount": 999000, "expense_date": "2026-08-10"}))
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance?from=2026-07-01&to=2026-07-31", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance?from=2026-07-01&to=2026-07-31", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -661,10 +694,10 @@ func TestReports_FinanceFilterByDateRange(t *testing.T) {
 
 func TestReports_FinanceBadDateFormat(t *testing.T) {
 	resetDB(t)
-	admin := seedUser(t, "ADMIN", true)
-	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 
-	status, resp := doRequest(t, http.MethodGet, "/api/reports/finance?to=31-07-2026", nil, adminToken)
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/finance?to=31-07-2026", nil, superAdminToken)
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
 	}
@@ -703,11 +736,18 @@ func TestReports_DashboardRequiresAuth(t *testing.T) {
 func TestReports_DashboardNonAdminForbidden(t *testing.T) {
 	resetDB(t)
 	kasir := seedUser(t, "KASIR", true)
-	token := login(t, kasir.Email, kasir.Password)
+	kasirToken := login(t, kasir.Email, kasir.Password)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
 
-	status, resp := doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, token)
-	if status != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d (resp=%+v)", status, resp)
+	for _, tc := range []struct {
+		role  string
+		token string
+	}{{"KASIR", kasirToken}, {"ADMIN", adminToken}} {
+		status, resp := doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, tc.token)
+		if status != http.StatusForbidden {
+			t.Fatalf("as %s: expected 403, got %d (resp=%+v)", tc.role, status, resp)
+		}
 	}
 }
 
@@ -715,6 +755,8 @@ func TestReports_DashboardDefaultsToCurrentMonth(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 
@@ -738,7 +780,7 @@ func TestReports_DashboardDefaultsToCurrentMonth(t *testing.T) {
 	lastMonth := time.Now().AddDate(0, -1, 0)
 	setTransactionCreatedAt(t, lastMonthTx.ID, lastMonth)
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -761,6 +803,8 @@ func TestReports_DashboardDateRangeOverride(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 
@@ -775,7 +819,7 @@ func TestReports_DashboardDateRangeOverride(t *testing.T) {
 	decodeData(t, resp, &tx)
 	setTransactionCreatedAt(t, tx.ID, time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC))
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard?from=2026-07-01&to=2026-07-31", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard?from=2026-07-01&to=2026-07-31", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -793,6 +837,8 @@ func TestReports_DashboardFinanceAndTransactionsMatchStandaloneReports(t *testin
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 	item := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
@@ -806,14 +852,14 @@ func TestReports_DashboardFinanceAndTransactionsMatchStandaloneReports(t *testin
 	category := createExpenseCategory(t, adminToken, "Listrik")
 	createExpenseAPI(t, adminToken, validExpenseBody(category.ID, map[string]any{"amount": 200000}))
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("dashboard: expected 200, got %d (resp=%+v)", status, resp)
 	}
 	var dashboard dashboardDTO
 	decodeData(t, resp, &dashboard)
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance?from="+dashboard.From+"&to="+dashboard.To, nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance?from="+dashboard.From+"&to="+dashboard.To, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("finance: expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -823,7 +869,7 @@ func TestReports_DashboardFinanceAndTransactionsMatchStandaloneReports(t *testin
 		t.Fatalf("expected dashboard finance to match standalone report, got dashboard=%+v standalone=%+v", dashboard.Finance, finance)
 	}
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/transactions?from="+dashboard.From+"&to="+dashboard.To, nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/transactions?from="+dashboard.From+"&to="+dashboard.To, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("transactions: expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -838,6 +884,8 @@ func TestReports_DashboardLowStockItemsOnly(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 
 	lowStockProduct := stockItemFixtureProduct(t, adminToken)
 	createStockItemAPI(t, adminToken, lowStockProduct.ID, validStockItemBody(map[string]any{"serial_number": "DASH-LOW-1"}))
@@ -849,7 +897,7 @@ func TestReports_DashboardLowStockItemsOnly(t *testing.T) {
 		createStockItemAPI(t, adminToken, plentyProduct.ID, validStockItemBody(map[string]any{"serial_number": "DASH-PLENTY-" + string(rune('A'+i))}))
 	}
 
-	status, resp := doRequest(t, http.MethodGet, "/api/reports/dashboard?threshold=5", nil, adminToken)
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/dashboard?threshold=5", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -880,6 +928,8 @@ func TestReports_DashboardPendingPurchaseOrders(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	supplier := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
 
@@ -895,7 +945,7 @@ func TestReports_DashboardPendingPurchaseOrders(t *testing.T) {
 		t.Fatalf("cancel: expected 200, got %d (resp=%+v)", status, resp)
 	}
 
-	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, adminToken)
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -915,6 +965,8 @@ func TestReports_DashboardPendingPurchaseOrdersCapAndTotal(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	supplier := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
 
@@ -924,7 +976,7 @@ func TestReports_DashboardPendingPurchaseOrdersCapAndTotal(t *testing.T) {
 		})
 	}
 
-	status, resp := doRequest(t, http.MethodGet, "/api/reports/dashboard?pending_limit=3", nil, adminToken)
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/dashboard?pending_limit=3", nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}

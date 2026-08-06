@@ -146,15 +146,21 @@ func NewRouter(
 					r.Put("/{id}", expenseHandler.Update)
 					r.Delete("/{id}", expenseHandler.Delete)
 				})
+				r.Route("/settings", func(r chi.Router) {
+					r.Get("/", settingsHandler.List)
+					r.Put("/", settingsHandler.Update)
+				})
+			})
+
+			// Dashboard/reports are SUPER_ADMIN-only — ADMIN no longer has
+			// business-figures visibility (client requirement).
+			r.Group(func(r chi.Router) {
+				r.Use(appmw.RequireRole("SUPER_ADMIN"))
 				r.Route("/reports", func(r chi.Router) {
 					r.Get("/transactions", reportHandler.Transactions)
 					r.Get("/stock", reportHandler.Stock)
 					r.Get("/finance", reportHandler.Finance)
 					r.Get("/dashboard", reportHandler.Dashboard)
-				})
-				r.Route("/settings", func(r chi.Router) {
-					r.Get("/", settingsHandler.List)
-					r.Put("/", settingsHandler.Update)
 				})
 			})
 		})

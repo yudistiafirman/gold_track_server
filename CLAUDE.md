@@ -68,7 +68,9 @@ are rejected 401 even before expiry.
 Most resources are admin-only (`ADMIN`/`SUPER_ADMIN`) for writes; a few (`products` GET,
 `customers` POST/GET, `transactions`, `stock-items` lookup/get) are open to all authenticated roles
 including `KASIR` because cashiers need them at checkout. `purchase-orders` and `stock-opnames` are
-strictly `ADMIN`/`SUPER_ADMIN` — no `KASIR` access at all (back-office only).
+strictly `ADMIN`/`SUPER_ADMIN` — no `KASIR` access at all (back-office only). `reports` (including
+`dashboard`) is stricter still — `SUPER_ADMIN` only, `ADMIN` gets 403 — business figures (revenue,
+COGS, margin) are hidden from plain `ADMIN`, same tier as `users`.
 
 ### ID strategy: internal BIGINT + external public_id (UUID)
 
@@ -150,6 +152,10 @@ Read-only, no pagination. `dashboard` composes the other three report queries in
 separate calls) so numbers stay consistent with the standalone endpoints. Date filters
 (`?from=&to=`) compare against `created_at::date` in UTC — dashboard defaults to "this month" in
 UTC specifically to avoid losing "today"'s transactions to local/server timezone drift.
+`SUPER_ADMIN`-only (client requirement — plain `ADMIN` doesn't get business-figures visibility),
+registered in its own `RequireRole("SUPER_ADMIN")` group in `router.go`, separate from the shared
+`ADMIN`/`SUPER_ADMIN` group the rest of back-office (`categories`, `products`, `purchase-orders`,
+`expenses`, etc.) sits in.
 
 ## Conventions
 

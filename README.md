@@ -1507,7 +1507,7 @@ Contoh response error:
 {"success":false,"error":{"code":"BAD_REQUEST","message":"expense_date wajib diisi"}}
 ```
 
-### /api/reports — laporan (BE-1301/BE-1302/BE-1303, ADMIN & SUPER_ADMIN)
+### /api/reports — laporan (BE-1301/BE-1302/BE-1303, SUPER_ADMIN only)
 
 ```bash
 GET /api/reports/transactions   # ?from=&to=&type=                          -> 200
@@ -2077,8 +2077,9 @@ Dua lapis test:
   open-ended kalau cuma salah satu diisi); `?page=&limit=` paginasi; `?category_id=` yang tidak
   ditemukan → 404
 
-**`reports_test.go`** — `/api/reports` (BE-1301/BE-1302/BE-1303, plus `/dashboard`)
-- Semua endpoint tanpa token → 401; role KASIR → 403
+**`reports_test.go`** — `/api/reports` (BE-1301/BE-1302/BE-1303, plus `/dashboard`) — **SUPER_ADMIN only**
+- Semua endpoint tanpa token → 401; role KASIR atau ADMIN → 403 (cuma SUPER_ADMIN yang boleh lihat
+  angka bisnis)
 - **Transactions**: satu transaksi `SELL`, `BUY`, dan `SELL_SUPPLIER` → `breakdown[]` berisi
   ketiganya dengan `transaction_count`/`total_amount`/`total_weight` yang benar, `total` adalah
   jumlah ketiganya; `?type=SELL` → `breakdown[]` cuma berisi satu baris itu; `?type=INVALID` →
