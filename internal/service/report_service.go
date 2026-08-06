@@ -98,6 +98,16 @@ type PendingPurchaseOrderSummary struct {
 	CreatedAt    time.Time
 }
 
+// CashSummary is the "where the shop's money lives" snapshot — service-layer
+// copy of repository.CashSummaryTotals, kept distinct per this file's usual
+// repository.X → service.X DTO convention.
+type CashSummary struct {
+	TotalGoldValue     float64
+	TotalBalance       float64
+	TotalExternalFunds float64
+	TotalExternalDebts float64
+}
+
 type DashboardInput struct {
 	DateFrom     string // "" + DateTo == "" together → defaults to the current month
 	DateTo       string
@@ -119,6 +129,7 @@ type DashboardSummary struct {
 	LowStockItems              []StockReportItem // StockReport's Items filtered to LowStock == true
 	PendingPurchaseOrders      []PendingPurchaseOrderSummary
 	PendingPurchaseOrdersTotal int
+	Cash                       CashSummary
 }
 
 type ReportService interface {
@@ -126,6 +137,7 @@ type ReportService interface {
 	StockReport(ctx context.Context, threshold int) (StockReportSummary, error)
 	FinanceReport(ctx context.Context, input FinanceReportInput) (FinanceReportSummary, error)
 	Dashboard(ctx context.Context, input DashboardInput) (DashboardSummary, error)
+	CashSummary(ctx context.Context) (CashSummary, error)
 }
 
 type reportService struct {
@@ -308,6 +320,11 @@ func (s *reportService) Dashboard(ctx context.Context, input DashboardInput) (Da
 		})
 	}
 
+	cash, err := s.CashSummary(ctx)
+	if err != nil {
+		return DashboardSummary{}, err
+	}
+
 	return DashboardSummary{
 		From:                       dateFrom,
 		To:                         dateTo,
@@ -318,6 +335,21 @@ func (s *reportService) Dashboard(ctx context.Context, input DashboardInput) (Da
 		LowStockItems:              lowStockItems,
 		PendingPurchaseOrders:      pendingItems,
 		PendingPurchaseOrdersTotal: pendingTotal,
+		Cash:                       cash,
+	}, nil
+}
+
+func (s *reportService) CashSummary(ctx context.Context) (CashSummary, error) {
+	totals, err := s.reportRepo.CashSummary(ctx)
+	if err != nil {
+		return CashSummary{}, apperror.Internal("failed to summarize cash", err)
+	}
+
+	return CashSummary{
+		TotalGoldValue:     totals.TotalGoldValue,
+		TotalBalance:       totals.TotalBalance,
+		TotalExternalFunds: totals.TotalExternalFunds,
+		TotalExternalDebts: totals.TotalExternalDebts,
 	}, nil
 }
 

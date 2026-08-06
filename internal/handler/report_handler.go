@@ -224,6 +224,24 @@ func (h *ReportHandler) Finance(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// cashSummaryResponse is the "where the shop's money lives" snapshot.
+// total_gold_value is a live aggregate over stock_items, not a stored field.
+type cashSummaryResponse struct {
+	TotalGoldValue     float64 `json:"total_gold_value"`
+	TotalBalance       float64 `json:"total_balance"`
+	TotalExternalFunds float64 `json:"total_external_funds"`
+	TotalExternalDebts float64 `json:"total_external_debts"`
+}
+
+func toCashSummaryResponse(c service.CashSummary) cashSummaryResponse {
+	return cashSummaryResponse{
+		TotalGoldValue:     c.TotalGoldValue,
+		TotalBalance:       c.TotalBalance,
+		TotalExternalFunds: c.TotalExternalFunds,
+		TotalExternalDebts: c.TotalExternalDebts,
+	}
+}
+
 type pendingPurchaseOrderResponse struct {
 	ID           string    `json:"id"`
 	POCode       string    `json:"po_code"`
@@ -244,6 +262,7 @@ type dashboardResponse struct {
 	LowStockItems              []stockReportItemResponse          `json:"low_stock_items"`
 	PendingPurchaseOrders      []pendingPurchaseOrderResponse     `json:"pending_purchase_orders"`
 	PendingPurchaseOrdersTotal int                                `json:"pending_purchase_orders_total"`
+	CashSummary                cashSummaryResponse                `json:"cash_summary"`
 }
 
 // Dashboard composes TransactionReport/StockReport/FinanceReport plus a
@@ -297,5 +316,6 @@ func (h *ReportHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		LowStockItems:              lowStockItems,
 		PendingPurchaseOrders:      pending,
 		PendingPurchaseOrdersTotal: result.PendingPurchaseOrdersTotal,
+		CashSummary:                toCashSummaryResponse(result.Cash),
 	})
 }

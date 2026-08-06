@@ -67,6 +67,17 @@ type PendingPurchaseOrder struct {
 	CreatedAt    time.Time
 }
 
+// CashSummaryTotals is the "where the shop's money lives" snapshot: current
+// gold stock value, current cash/bank balances, current external funds and
+// external debts. All four are point-in-time (no date range — none of the
+// underlying tables has a date column to filter by).
+type CashSummaryTotals struct {
+	TotalGoldValue     float64
+	TotalBalance       float64
+	TotalExternalFunds float64
+	TotalExternalDebts float64
+}
+
 type ReportRepository interface {
 	// TransactionSummary groups transactions by type within the filtered
 	// date range.
@@ -84,6 +95,8 @@ type ReportRepository interface {
 	// orders still awaiting receipt, newest first, plus the total count of
 	// all such POs (may exceed len(items) if there are more than limit).
 	PendingPurchaseOrders(ctx context.Context, limit int) ([]PendingPurchaseOrder, int, error)
+	// CashSummary computes the 4 cash-tracking totals in one round trip.
+	CashSummary(ctx context.Context) (CashSummaryTotals, error)
 }
 
 type reportRepository struct {
@@ -300,4 +313,20 @@ func (r *reportRepository) PendingPurchaseOrders(ctx context.Context, limit int)
 		return nil, 0, fmt.Errorf("list pending purchase orders: %w", err)
 	}
 	return pending, total, nil
+}
+
+func (r *reportRepository) CashSummary(ctx context.Context) (CashSummaryTotals, error) {
+	const query = `
+		SELECT
+			(SELECT COALESCE(SUM(purchase_price),0) FROM stock_items WHERE status = 'AVAILABLE')::float8,
+			(SELECT COALESCE(SUM(balance),0) FROM balance_accounts)::float8,
+			(SELECT COALESCE(SUM(amount),0) FROM external_funds)::float8,
+			(SELECT COALESCE(SUM(amount),0) FROM external_debts)::float8
+	`
+
+	var t CashSummaryTotals
+	if err := r.db.QueryRow(ctx, query).Scan(&t.TotalGoldValue, &t.TotalBalance, &t.TotalExternalFunds, &t.TotalExternalDebts); err != nil {
+		return CashSummaryTotals{}, fmt.Errorf("summarize cash: %w", err)
+	}
+	return t, nil
 }

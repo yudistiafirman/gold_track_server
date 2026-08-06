@@ -1507,6 +1507,107 @@ Contoh response error:
 {"success":false,"error":{"code":"BAD_REQUEST","message":"expense_date wajib diisi"}}
 ```
 
+### /api/balance-accounts, /api/external-funds & /api/external-debts — tracking kas manual (SUPER_ADMIN only)
+
+```bash
+POST   /api/balance-accounts          # { name, balance }                    -> 201 / 400 / 409
+GET    /api/balance-accounts          # tanpa pagination, list flat          -> 200
+GET    /api/balance-accounts/{id}                                            -> 200 / 404
+PUT    /api/balance-accounts/{id}     # { name, balance }                    -> 200 / 400 / 404 / 409
+DELETE /api/balance-accounts/{id}                                            -> 200 / 404
+
+POST   /api/external-funds            # { description, amount }              -> 201 / 400
+GET    /api/external-funds            # tanpa pagination, list flat          -> 200
+GET    /api/external-funds/{id}                                              -> 200 / 404
+PUT    /api/external-funds/{id}       # { description, amount }              -> 200 / 400 / 404
+DELETE /api/external-funds/{id}                                              -> 200 / 404
+
+POST   /api/external-debts            # { debtor_name, amount }              -> 201 / 400
+GET    /api/external-debts            # tanpa pagination, list flat          -> 200
+GET    /api/external-debts/{id}                                              -> 200 / 404
+PUT    /api/external-debts/{id}       # { debtor_name, amount }              -> 200 / 400 / 404
+DELETE /api/external-debts/{id}                                              -> 200 / 404
+```
+
+Fitur pencatatan kas manual buat owner toko: "di mana saja uang toko berada" — saldo rekening/cash
+(`balance_accounts`), uang yang lagi di luar/belum settle (`external_funds`, mis. buyback yang
+belum dibayar tunai), dan piutang orang yang pinjam uang ke toko (`external_debts`). Ketiganya
+**SUPER_ADMIN only** — beda dari kebanyakan resource lain di backend ini yang ADMIN+SUPER_ADMIN,
+karena data uang/kas ini sensitif dan sengaja dibatasi lebih ketat (sama seperti `/api/reports`).
+
+**Beda dari resource CRUD lain**: sama seperti `expense_categories`, ketiga tabel ini **tidak
+punya kolom `is_active` maupun `updated_at`** — `DELETE` di sini betulan hapus baris (hard delete),
+bukan nonaktifkan, dan tidak ada riwayat/log perubahan sama sekali (keputusan sadar dari
+klien: "kalau bikin ribet ya hapus aja"). `PUT` yang menimpa `balance`/`amount` langsung **adalah**
+mekanisme edit manualnya — misal setoran ke rekening, atau cicilan piutang (kurangi `amount` dikit
+demi dikit lewat `PUT` berulang), tanpa perlu endpoint transaksi/pembayaran terpisah. Kalau uang di
+`external_funds`/`external_debts` sudah selesai/lunas, baris itu tinggal di-`DELETE` — tidak ada
+field status. `external_funds.amount` isinya nominal Rupiah, bukan gramasi — gramasi (kalau ada)
+cukup ditulis di `description` sebagai teks bebas (mis. `"Eliza Buyback 2 gram"`).
+`balance_accounts.name` unik (`409` kalau dobel, mis. dua kali bikin "BCA Bisnis"); `description`
+di `external_funds` dan `debtor_name` di `external_debts` **tidak** unik (orang yang sama boleh
+muncul berkali-kali dari waktu ke waktu). `GET` list (tanpa pagination) urut terbaru duluan
+(`ORDER BY id DESC`) di ketiganya.
+
+Validasi tier `400` (bukan `422` — tidak ada resource ini yang mencetak baris `stock_items` baru):
+`name`/`description`/`debtor_name` wajib diisi (tidak boleh kosong/hanya spasi); `balance` di
+`balance_accounts` tidak boleh negatif (`>= 0`, boleh nol buat rekening baru yang belum ada
+saldonya); `amount` di `external_funds`/`external_debts` wajib `> 0`.
+
+Contoh response `POST /api/balance-accounts` (201):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "3f4a5b6c-7d8e-9f01-2345-6789abcdef01",
+    "name": "BCA Bisnis",
+    "balance": 5000000,
+    "created_at": "2026-08-06T09:00:00Z"
+  }
+}
+```
+
+Contoh response `POST /api/external-funds` (201):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "4a5b6c7d-8e9f-0123-4567-89abcdef0123",
+    "description": "Eliza Buyback 2 gram",
+    "amount": 5000000,
+    "created_at": "2026-08-06T09:00:00Z"
+  }
+}
+```
+
+Contoh response `POST /api/external-debts` (201):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "5b6c7d8e-9f01-2345-6789-abcdef012345",
+    "debtor_name": "Budi",
+    "amount": 2000000,
+    "created_at": "2026-08-06T09:00:00Z"
+  }
+}
+```
+
+Contoh response error:
+```json
+// 409 — nama rekening saldo dobel
+{"success":false,"error":{"code":"CONFLICT","message":"nama saldo sudah dipakai"}}
+
+// 400 — balance negatif
+{"success":false,"error":{"code":"BAD_REQUEST","message":"balance tidak boleh negatif"}}
+
+// 400 — amount nol/negatif di uang diluar / hutang diluar
+{"success":false,"error":{"code":"BAD_REQUEST","message":"amount wajib diisi lebih besar dari 0"}}
+
+// 404 — resource tidak ditemukan (pola sama di ketiga resource)
+{"success":false,"error":{"code":"NOT_FOUND","message":"hutang tidak ditemukan"}}
+```
+
 ### /api/reports — laporan (BE-1301/BE-1302/BE-1303, SUPER_ADMIN only)
 
 ```bash
@@ -1577,6 +1678,18 @@ sesi DB yang UTC; pakai timezone lokal di sini bisa diam-diam menghilangkan tran
 kalau tanggal lokal server sudah ganti hari duluan sebelum UTC-nya) kalau keduanya tidak diisi;
 kalau salah satu/keduanya diisi, dipakai persis seperti apa adanya (sama seperti laporan lain).
 
+- `cash_summary` — 4 angka ringkasan "di mana saja uang toko berada", sengaja **tidak** punya
+  endpoint berdiri sendiri (beda dari tiga bagian lain) — cukup satu endpoint dashboard buat FE,
+  tanpa perlu request kedua. Tidak terpengaruh `?from=&to=` di level atas: keempat angkanya adalah
+  snapshot posisi **saat ini**, bukan agregat periode, dan tidak satu pun dari tabel
+  `balance_accounts`/`external_funds`/`external_debts` punya kolom tanggal buat difilter. Isinya:
+  - `total_gold_value` — nilai stok emas yang masih ada di toko, dihitung **live** dari
+    `SUM(purchase_price)` seluruh `stock_items` berstatus `AVAILABLE` (bukan field tersimpan —
+    selalu dihitung ulang tiap request, otomatis ikut naik/turun seiring stok masuk/terjual).
+  - `total_balance` — jumlah seluruh `balance_accounts.balance` (Total Saldo, termasuk entri "Cash").
+  - `total_external_funds` — jumlah seluruh `external_funds.amount`.
+  - `total_external_debts` — jumlah seluruh `external_debts.amount`.
+
 Contoh response `GET /api/reports/transactions` (200):
 ```json
 {
@@ -1643,7 +1756,13 @@ Contoh response `GET /api/reports/dashboard` (200):
     "pending_purchase_orders": [
       { "id": "...", "po_code": "PO-20260801-0001", "supplier_name": "Toko Emas Jaya", "total_amount": 800000, "created_at": "2026-08-01T09:00:00Z" }
     ],
-    "pending_purchase_orders_total": 1
+    "pending_purchase_orders_total": 1,
+    "cash_summary": {
+      "total_gold_value": 150000000,
+      "total_balance": 8500000,
+      "total_external_funds": 5000000,
+      "total_external_debts": 2000000
+    }
   }
 }
 ```

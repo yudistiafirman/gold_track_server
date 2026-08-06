@@ -40,6 +40,9 @@ func NewRouter(
 	reportHandler *ReportHandler,
 	settingsHandler *SettingsHandler,
 	goldPriceHandler *GoldPriceHandler,
+	balanceAccountHandler *BalanceAccountHandler,
+	externalFundHandler *ExternalFundHandler,
+	externalDebtHandler *ExternalDebtHandler,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -161,6 +164,34 @@ func NewRouter(
 					r.Get("/stock", reportHandler.Stock)
 					r.Get("/finance", reportHandler.Finance)
 					r.Get("/dashboard", reportHandler.Dashboard)
+				})
+			})
+
+			// Cash tracking (Saldo Uang / Uang Diluar / Hutang Diluar) is
+			// SUPER_ADMIN-only, same as reports — plain ADMIN never sees
+			// where the shop's money lives (client requirement).
+			r.Group(func(r chi.Router) {
+				r.Use(appmw.RequireRole("SUPER_ADMIN"))
+				r.Route("/balance-accounts", func(r chi.Router) {
+					r.Get("/", balanceAccountHandler.List)
+					r.Post("/", balanceAccountHandler.Create)
+					r.Get("/{id}", balanceAccountHandler.Get)
+					r.Put("/{id}", balanceAccountHandler.Update)
+					r.Delete("/{id}", balanceAccountHandler.Delete)
+				})
+				r.Route("/external-funds", func(r chi.Router) {
+					r.Get("/", externalFundHandler.List)
+					r.Post("/", externalFundHandler.Create)
+					r.Get("/{id}", externalFundHandler.Get)
+					r.Put("/{id}", externalFundHandler.Update)
+					r.Delete("/{id}", externalFundHandler.Delete)
+				})
+				r.Route("/external-debts", func(r chi.Router) {
+					r.Get("/", externalDebtHandler.List)
+					r.Post("/", externalDebtHandler.Create)
+					r.Get("/{id}", externalDebtHandler.Get)
+					r.Put("/{id}", externalDebtHandler.Update)
+					r.Delete("/{id}", externalDebtHandler.Delete)
 				})
 			})
 		})

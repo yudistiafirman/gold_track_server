@@ -81,6 +81,7 @@ func resetDB(t *testing.T) {
 			token_blacklist, stock_opname_items, stock_opnames, expenses,
 			expense_categories, transaction_items, transactions,
 			purchase_order_items, purchase_orders, stock_items, gold_prices,
+			balance_accounts, external_funds, external_debts,
 			products, categories, brands, customers, suppliers, settings, users
 		RESTART IDENTITY CASCADE
 	`

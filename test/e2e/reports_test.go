@@ -712,6 +712,13 @@ type pendingPurchaseOrderDTO struct {
 	TotalAmount  float64 `json:"total_amount"`
 }
 
+type cashSummaryDTO struct {
+	TotalGoldValue     float64 `json:"total_gold_value"`
+	TotalBalance       float64 `json:"total_balance"`
+	TotalExternalFunds float64 `json:"total_external_funds"`
+	TotalExternalDebts float64 `json:"total_external_debts"`
+}
+
 type dashboardDTO struct {
 	From                       string                        `json:"from"`
 	To                         string                        `json:"to"`
@@ -722,6 +729,7 @@ type dashboardDTO struct {
 	LowStockItems              []stockReportItemDTO          `json:"low_stock_items"`
 	PendingPurchaseOrders      []pendingPurchaseOrderDTO     `json:"pending_purchase_orders"`
 	PendingPurchaseOrdersTotal int                           `json:"pending_purchase_orders_total"`
+	CashSummary                cashSummaryDTO                `json:"cash_summary"`
 }
 
 func TestReports_DashboardRequiresAuth(t *testing.T) {
@@ -988,5 +996,53 @@ func TestReports_DashboardPendingPurchaseOrdersCapAndTotal(t *testing.T) {
 	}
 	if dashboard.PendingPurchaseOrdersTotal != 7 {
 		t.Fatalf("expected total=7 (true count beyond the cap), got %d", dashboard.PendingPurchaseOrdersTotal)
+	}
+}
+
+// --- dashboard cash_summary (no standalone endpoint — folded into the
+// dashboard only, so the FE hits one endpoint for the whole page) ---
+
+func TestReports_DashboardCashSummary(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+
+	// AVAILABLE unit contributes to total_gold_value...
+	createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{
+		"serial_number": "CASH-AVAIL", "purchase_price": 10000000,
+	}))
+	// ...a SOLD unit with a different price must be excluded.
+	soldItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{
+		"serial_number": "CASH-SOLD", "purchase_price": 99999999,
+	}))
+	markStockItemSold(t, soldItem.ID)
+
+	createBalanceAccount(t, superAdminToken, "BCA Bisnis", 5000000)
+	createBalanceAccount(t, superAdminToken, "Cash", 1000000)
+	createExternalFund(t, superAdminToken, "Eliza Buyback 2 gram", 5000000)
+	createExternalDebt(t, superAdminToken, "Budi", 2000000)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/reports/dashboard", nil, superAdminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var dashboard dashboardDTO
+	decodeData(t, resp, &dashboard)
+	cash := dashboard.CashSummary
+
+	if cash.TotalGoldValue != 10000000 {
+		t.Fatalf("expected total_gold_value=10000000 (SOLD unit excluded), got %v", cash.TotalGoldValue)
+	}
+	if cash.TotalBalance != 6000000 {
+		t.Fatalf("expected total_balance=6000000, got %v", cash.TotalBalance)
+	}
+	if cash.TotalExternalFunds != 5000000 {
+		t.Fatalf("expected total_external_funds=5000000, got %v", cash.TotalExternalFunds)
+	}
+	if cash.TotalExternalDebts != 2000000 {
+		t.Fatalf("expected total_external_debts=2000000, got %v", cash.TotalExternalDebts)
 	}
 }

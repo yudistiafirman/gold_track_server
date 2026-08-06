@@ -106,7 +106,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	goldPriceService := service.NewGoldPriceService(goldPriceRepo)
 	goldPriceHandler := handler.NewGoldPriceHandler(goldPriceService)
 
-	router := handler.NewRouter(log, cfg.CORS, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler, transactionHandler, purchaseOrderHandler, stockOpnameHandler, expenseCategoryHandler, expenseHandler, reportHandler, settingsHandler, goldPriceHandler)
+	balanceAccountRepo := repository.NewBalanceAccountRepository(dbPool)
+	balanceAccountService := service.NewBalanceAccountService(balanceAccountRepo)
+	balanceAccountHandler := handler.NewBalanceAccountHandler(balanceAccountService)
+
+	externalFundRepo := repository.NewExternalFundRepository(dbPool)
+	externalFundService := service.NewExternalFundService(externalFundRepo)
+	externalFundHandler := handler.NewExternalFundHandler(externalFundService)
+
+	externalDebtRepo := repository.NewExternalDebtRepository(dbPool)
+	externalDebtService := service.NewExternalDebtService(externalDebtRepo)
+	externalDebtHandler := handler.NewExternalDebtHandler(externalDebtService)
+
+	router := handler.NewRouter(log, cfg.CORS, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler, transactionHandler, purchaseOrderHandler, stockOpnameHandler, expenseCategoryHandler, expenseHandler, reportHandler, settingsHandler, goldPriceHandler, balanceAccountHandler, externalFundHandler, externalDebtHandler)
 
 	return &App{Pool: dbPool, Router: router, GoldPriceService: goldPriceService, TokenBlacklistRepo: tokenBlacklistRepo}, nil
 }
