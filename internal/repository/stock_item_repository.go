@@ -36,7 +36,10 @@ var ErrSerialNumberTaken = errors.New("serial number already in use")
 // pointing at nothing, breaking the transaction/audit trail.
 var ErrStockItemReferenced = errors.New("stock item still referenced by a transaction or stock opname")
 
-const uqStockItemsSerialNumber = "uq_stock_items_serial_number"
+// uqStockItemsSerialNumber matches the partial unique index (migration
+// 000028) that only enforces uniqueness among AVAILABLE units — a serial
+// number becomes reusable once its unit is SOLD.
+const uqStockItemsSerialNumber = "uq_stock_items_serial_number_available"
 
 const createStockItemMaxAttempts = 5
 
