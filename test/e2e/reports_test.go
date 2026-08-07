@@ -143,6 +143,55 @@ func TestReports_TransactionsBreakdownAllTypes(t *testing.T) {
 	}
 }
 
+func TestReports_TransactionsExcludesCancelled(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
+	product := stockItemFixtureProduct(t, adminToken) // weight_gram = 10
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	keptItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "RPT-KEPT"}))
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": keptItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("kept sell: expected 201, got %d (resp=%+v)", status, resp)
+	}
+
+	cancelledItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "RPT-CANCELLED"}))
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": cancelledItem.ID, "price_total": 9000000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("to-be-cancelled sell: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var cancelledTx transactionDTO
+	decodeData(t, resp, &cancelledTx)
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+cancelledTx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("cancel: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/transactions", nil, superAdminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var report transactionReportDTO
+	decodeData(t, resp, &report)
+
+	sell := breakdownByType(report, "SELL")
+	if sell == nil || sell.TransactionCount != 1 || sell.TotalAmount != 1500000 || sell.TotalWeight != 10 {
+		t.Fatalf("expected only the non-cancelled sell counted (count=1 amount=1500000 weight=10), got %+v", sell)
+	}
+	wantTotal := transactionReportTotalsDTO{TransactionCount: 1, TotalAmount: 1500000, TotalWeight: 10}
+	if report.Total != wantTotal {
+		t.Fatalf("expected total %+v (cancelled transaction excluded), got %+v", wantTotal, report.Total)
+	}
+}
+
 func TestReports_TransactionsFilterByType(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
@@ -538,6 +587,56 @@ func TestReports_FinanceGrossProfitExcludesBuy(t *testing.T) {
 	}
 	if report.GrossMarginPercent != 0 {
 		t.Fatalf("expected gross_margin_percent=0 when there's no revenue, got %v", report.GrossMarginPercent)
+	}
+}
+
+func TestReports_FinanceExcludesCancelledSale(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	// purchase_price (cogs) = 1000000 (validStockItemBody default), sold for 1500000.
+	sellItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "RPT-FIN-KEPT"}))
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": sellItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("kept sell: expected 201, got %d (resp=%+v)", status, resp)
+	}
+
+	cancelledItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "RPT-FIN-CANCELLED"}))
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": cancelledItem.ID, "price_total": 9000000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("to-be-cancelled sell: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var cancelledTx transactionDTO
+	decodeData(t, resp, &cancelledTx)
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+cancelledTx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("cancel: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/reports/finance", nil, superAdminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var report financeReportDTO
+	decodeData(t, resp, &report)
+
+	sell := salesBreakdownByType(report, "SELL")
+	if sell == nil || sell.TransactionCount != 1 || sell.TotalRevenue != 1500000 || sell.TotalCOGS != 1000000 || sell.GrossProfit != 500000 {
+		t.Fatalf("expected only the non-cancelled sell counted (revenue=1500000 cogs=1000000 profit=500000), got %+v", sell)
+	}
+	if report.TotalRevenue != 1500000 || report.TotalCOGS != 1000000 || report.GrossProfit != 500000 {
+		t.Fatalf("expected cancelled sale excluded from totals (revenue=1500000 cogs=1000000 profit=500000), got revenue=%v cogs=%v profit=%v",
+			report.TotalRevenue, report.TotalCOGS, report.GrossProfit)
 	}
 }
 

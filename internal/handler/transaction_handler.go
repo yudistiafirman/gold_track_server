@@ -254,6 +254,24 @@ func (h *TransactionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, toTransactionResponse(result))
 }
 
+// Cancel reverses a COMPLETED transaction's stock effects and flips it to
+// CANCELLED — ADMIN/SUPER_ADMIN only, enforced by RequireRole in router.go.
+func (h *TransactionHandler) Cancel(w http.ResponseWriter, r *http.Request) {
+	id, err := publicIDParam(r)
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	result, err := h.transactionService.Cancel(r.Context(), id)
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, toTransactionResponse(result))
+}
+
 // receiptPartyResponse is the counterparty (customer or supplier) shown on
 // a receipt — nil/omitted when not applicable to the transaction's type.
 type receiptPartyResponse struct {

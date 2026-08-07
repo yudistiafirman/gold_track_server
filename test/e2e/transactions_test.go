@@ -1012,3 +1012,227 @@ func TestTransactions_GetInvalidIDFormat(t *testing.T) {
 		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
 	}
 }
+
+// --- cancel ---
+
+func TestTransactions_CancelRequiresAuth(t *testing.T) {
+	resetDB(t)
+
+	status, _ := doRequest(t, http.MethodPost, "/api/transactions/"+nonexistentUUID+"/cancel", nil, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", status)
+	}
+}
+
+func TestTransactions_CancelForbiddenForKasir(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+
+	kasir := seedUser(t, "KASIR", true)
+	kasirToken := login(t, kasir.Email, kasir.Password)
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+tx.ID+"/cancel", nil, kasirToken)
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403 for KASIR, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestTransactions_CancelNotFound(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions/"+nonexistentUUID+"/cancel", nil, adminToken)
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestTransactions_CancelSellRevertsStockToAvailableAndSellableAgain(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+tx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("cancel: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var cancelled transactionDTO
+	decodeData(t, resp, &cancelled)
+	if cancelled.Status != "CANCELLED" {
+		t.Fatalf("expected status CANCELLED, got %q", cancelled.Status)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+stockItem.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get stock item: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockItemDTO
+	decodeData(t, resp, &fetched)
+	if fetched.Status != "AVAILABLE" {
+		t.Fatalf("expected unit status AVAILABLE after cancel, got %q", fetched.Status)
+	}
+
+	// Sellable again, exactly as if it had never been sold.
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItem.ID, "price_total": 1600000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("re-sell after cancel: expected 201, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestTransactions_CancelBuyVoidsCreatedStockItem(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "CANCEL-BUY-SN", "condition": "GOOD", "price_total": 900000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+	stockItemID := tx.Items[0].StockItemID
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+tx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("cancel: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var cancelled transactionDTO
+	decodeData(t, resp, &cancelled)
+	if cancelled.Status != "CANCELLED" {
+		t.Fatalf("expected status CANCELLED, got %q", cancelled.Status)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+stockItemID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get stock item: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockItemDTO
+	decodeData(t, resp, &fetched)
+	if fetched.Status != "VOID" {
+		t.Fatalf("expected unit status VOID after cancelling buy, got %q", fetched.Status)
+	}
+
+	// A VOID unit is never in stock — a serial number reused via a fresh buy
+	// must be accepted, same as it would be for a SOLD unit.
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "CANCEL-BUY-SN", "condition": "GOOD", "price_total": 950000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("re-buy same serial after void: expected 201, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestTransactions_CancelBuyAlreadyResoldRejected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "RESOLD-BUY-SN", "condition": "GOOD", "price_total": 900000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("buy: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var buyTx transactionDTO
+	decodeData(t, resp, &buyTx)
+	stockItemID := buyTx.Items[0].StockItemID
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItemID, "price_total": 1200000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("sell: expected 201, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+buyTx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("cancel buy of already-resold unit: expected 409, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestTransactions_CancelAlreadyCancelledConflict(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+tx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("first cancel: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+tx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("second cancel: expected 409, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestTransactions_CancelAllowedForSuperAdmin(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+tx.ID+"/cancel", nil, superAdminToken)
+	if status != http.StatusOK {
+		t.Fatalf("cancel by SUPER_ADMIN: expected 200, got %d (resp=%+v)", status, resp)
+	}
+}

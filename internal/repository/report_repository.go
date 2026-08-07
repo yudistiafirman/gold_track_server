@@ -108,7 +108,9 @@ func NewReportRepository(db *pgxpool.Pool) ReportRepository {
 }
 
 func (r *reportRepository) TransactionSummary(ctx context.Context, filter TransactionReportFilter) ([]TransactionTypeBreakdown, error) {
-	var conditions []string
+	// CANCELLED transactions never count toward reported figures — a
+	// cancelled sale/buy has no real revenue/weight/COGS effect anymore.
+	conditions := []string{"status = 'COMPLETED'"}
 	var args []any
 
 	if filter.DateFrom != nil {
@@ -210,7 +212,7 @@ func (r *reportRepository) SalesProfitByType(ctx context.Context, dateFrom, date
 		       COALESCE(SUM(ti.price_total),0)::float8, COALESCE(SUM(ti.cogs),0)::float8
 		FROM transaction_items ti
 		JOIN transactions t ON t.id = ti.transaction_id
-		WHERE t.type IN ('SELL', 'SELL_SUPPLIER') AND ti.cogs IS NOT NULL
+		WHERE t.type IN ('SELL', 'SELL_SUPPLIER') AND ti.cogs IS NOT NULL AND t.status = 'COMPLETED'
 	` + dateWhere + `
 		GROUP BY t.type
 		ORDER BY t.type

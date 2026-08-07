@@ -34,6 +34,15 @@ var ErrTransactionCodeGenerationFailed = errors.New("failed to generate a unique
 // ErrTransactionNotFound is returned when no transaction matches the lookup.
 var ErrTransactionNotFound = errors.New("transaction not found")
 
+// ErrTransactionAlreadyCancelled is returned when Cancel is called on a
+// transaction whose status isn't COMPLETED (already CANCELLED).
+var ErrTransactionAlreadyCancelled = errors.New("transaction already cancelled")
+
+// ErrStockItemAlreadyResold is returned when cancelling a BUY transaction
+// whose stock item was already sold onward in a later transaction — the
+// unit is no longer in the shop's possession, so the buy can't be undone.
+var ErrStockItemAlreadyResold = errors.New("stock item already resold, cannot cancel buy")
+
 const createSaleMaxAttempts = 5
 const createBuyMaxAttempts = 5
 
@@ -177,6 +186,13 @@ type TransactionRepository interface {
 	// public_id, so a concurrent caller racing to set it computes the same
 	// value, no lost-update risk.
 	SetInvoiceURL(ctx context.Context, id int64, url string) error
+	// Cancel locks the transaction row, verifies it's still COMPLETED, and
+	// reverses its stock effects — SELL/SELL_SUPPLIER units go back to
+	// AVAILABLE, BUY-created units go to VOID (never AVAILABLE again: the
+	// unit was never legitimately in stock) — then flips the transaction to
+	// CANCELLED. All in one DB transaction, row-locked against concurrent
+	// double-cancel.
+	Cancel(ctx context.Context, publicID string) (*model.Transaction, error)
 }
 
 type transactionRepository struct {
@@ -621,4 +637,78 @@ func (r *transactionRepository) SetInvoiceURL(ctx context.Context, id int64, url
 		return fmt.Errorf("set invoice url: %w", err)
 	}
 	return nil
+}
+
+func (r *transactionRepository) Cancel(ctx context.Context, publicID string) (*model.Transaction, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var transactionID int64
+	var txType, status string
+	err = tx.QueryRow(ctx, `SELECT id, type, status FROM transactions WHERE public_id = $1 FOR UPDATE`, publicID).
+		Scan(&transactionID, &txType, &status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrTransactionNotFound
+		}
+		return nil, fmt.Errorf("lock transaction: %w", err)
+	}
+	if status != "COMPLETED" {
+		return nil, ErrTransactionAlreadyCancelled
+	}
+
+	rows, err := tx.Query(ctx, `SELECT stock_item_id FROM transaction_items WHERE transaction_id = $1`, transactionID)
+	if err != nil {
+		return nil, fmt.Errorf("list transaction items for cancel: %w", err)
+	}
+	var stockItemIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan transaction item stock_item_id: %w", err)
+		}
+		stockItemIDs = append(stockItemIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list transaction items for cancel: %w", err)
+	}
+	rows.Close()
+
+	if txType == "BUY" {
+		for _, id := range stockItemIDs {
+			var itemStatus string
+			if err := tx.QueryRow(ctx, `SELECT status FROM stock_items WHERE id = $1 FOR UPDATE`, id).Scan(&itemStatus); err != nil {
+				return nil, fmt.Errorf("lock stock item for buy cancel: %w", err)
+			}
+			if itemStatus != "AVAILABLE" {
+				return nil, ErrStockItemAlreadyResold
+			}
+			if _, err := tx.Exec(ctx, `UPDATE stock_items SET status = 'VOID', updated_at = now() WHERE id = $1`, id); err != nil {
+				return nil, fmt.Errorf("void stock item: %w", err)
+			}
+		}
+	} else {
+		for _, id := range stockItemIDs {
+			const query = `UPDATE stock_items SET status = 'AVAILABLE', sold_at = NULL, updated_at = now() WHERE id = $1`
+			if _, err := tx.Exec(ctx, query, id); err != nil {
+				return nil, fmt.Errorf("revert stock item to available: %w", err)
+			}
+		}
+	}
+
+	query := `UPDATE transactions SET status = 'CANCELLED' WHERE id = $1 RETURNING ` + transactionColumns
+	var t model.Transaction
+	if err := scanTransaction(tx.QueryRow(ctx, query, transactionID), &t); err != nil {
+		return nil, fmt.Errorf("cancel transaction: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+
+	return &t, nil
 }

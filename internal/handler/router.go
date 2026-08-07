@@ -121,6 +121,7 @@ func NewRouter(
 				})
 				r.Put("/customers/{id}", customerHandler.Update)
 				r.Delete("/customers/{id}", customerHandler.Delete)
+				r.Post("/transactions/{id}/cancel", transactionHandler.Cancel)
 				r.Route("/purchase-orders", func(r chi.Router) {
 					r.Get("/", purchaseOrderHandler.List)
 					r.Post("/", purchaseOrderHandler.Create)

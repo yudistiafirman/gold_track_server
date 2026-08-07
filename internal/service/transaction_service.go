@@ -145,6 +145,7 @@ type TransactionService interface {
 	ListByCustomer(ctx context.Context, input ListCustomerTransactionsInput) (TransactionListResult, error)
 	Get(ctx context.Context, publicID string) (TransactionSummary, error)
 	GetReceipt(ctx context.Context, publicID string) (ReceiptSummary, error)
+	Cancel(ctx context.Context, publicID string) (TransactionSummary, error)
 }
 
 type transactionService struct {
@@ -507,6 +508,27 @@ func (s *transactionService) Get(ctx context.Context, publicID string) (Transact
 		CreatedAt:       transaction.CreatedAt,
 		CompletedAt:     transaction.CompletedAt,
 	}, nil
+}
+
+// Cancel reverses a COMPLETED transaction's stock effects (SELL/SELL_SUPPLIER
+// units go back to AVAILABLE, BUY-created units go to VOID — never
+// AVAILABLE, since that unit was never legitimately bought into stock) and
+// flips it to CANCELLED. Restricted to ADMIN/SUPER_ADMIN at the route level.
+func (s *transactionService) Cancel(ctx context.Context, publicID string) (TransactionSummary, error) {
+	if _, err := s.transactionRepo.Cancel(ctx, publicID); err != nil {
+		switch {
+		case errors.Is(err, repository.ErrTransactionNotFound):
+			return TransactionSummary{}, apperror.NotFound("transaksi tidak ditemukan", nil)
+		case errors.Is(err, repository.ErrTransactionAlreadyCancelled):
+			return TransactionSummary{}, apperror.Conflict("transaksi sudah dibatalkan", nil)
+		case errors.Is(err, repository.ErrStockItemAlreadyResold):
+			return TransactionSummary{}, apperror.Conflict("unit hasil buyback ini sudah terjual lagi di transaksi lain, tidak bisa dibatalkan", nil)
+		default:
+			return TransactionSummary{}, apperror.Internal("failed to cancel transaction", err)
+		}
+	}
+
+	return s.Get(ctx, publicID)
 }
 
 // receiptShopSettingKeys are the settings rows read for a receipt's store
