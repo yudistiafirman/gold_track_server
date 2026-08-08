@@ -731,25 +731,47 @@ GET    /api/stock-items/lookup                 # ?barcode=&type=  cari unit buat
 GET    /api/stock-items/{id}                   # detail unit lengkap (termasuk barcode)         -> 200 / 404 (semua role, token valid)
 GET    /api/stock-items/{id}/label             # data buat cetak label CODE128                  -> 200 / 404 (semua role, token valid)
 PUT    /api/stock-items/{id}                   # edit unit, barcode & product_id terkunci        -> 200 / 404 / 409 (ADMIN & SUPER_ADMIN)
-DELETE /api/stock-items/{id}                   # HARD delete, hanya unit AVAILABLE               -> 200 / 404 / 409 (ADMIN & SUPER_ADMIN)
+DELETE /api/stock-items/{id}                   # arsipkan (status -> ARCHIVED), hanya unit AVAILABLE -> 200 / 404 / 409 (ADMIN & SUPER_ADMIN)
 ```
 
 `{productId}` maupun `{id}` adalah `public_id` (UUID). Beda dari resource lain di API ini:
 
-- **`DELETE` di sini HARD delete**, satu-satunya di seluruh API — setiap resource lain
-  (`users`/`categories`/`brands`/`products`/`suppliers`) soft-delete via `is_active`. Unit stok
-  yang `AVAILABLE` (belum terjual) dihapus permanen dari DB; unit yang `SOLD` **tidak bisa**
-  dihapus (409) — data transaksi historis harus tetap utuh. Guard-nya di level SQL
-  (`DELETE ... WHERE public_id = $1 AND status = 'AVAILABLE'`), bukan cuma cek-lalu-hapus di
-  level aplikasi — kalau baris tidak ke-delete, baru dicek ulang buat bedain "tidak ada" (404)
-  vs "ada tapi SOLD" (409).
-- **Ditolak (409) juga kalau unit masih direferensikan tabel lain**, walau statusnya
-  `AVAILABLE` — dua kasus nyata: unit hasil `BUY` (buyback) yang belum terjual lagi (masih ada
-  baris `transaction_items` yang nunjuk ke situ), atau unit yang pernah discan di sesi stock
-  opname (baris `stock_opname_items`). Kedua tabel itu FK ke `stock_items.id` tanpa
-  `ON DELETE CASCADE`, jadi hard-delete-nya bakal ditolak Postgres di level FK — repository
-  nangkep error itu (`isForeignKeyViolation`, pola yang sama dipakai `expense_categories`) dan
-  balikin 409 yang rapi, bukan 500 mentah.
+- **`DELETE` di sini soft-delete lewat `status`, bukan `is_active`** — konsisten sama semua
+  resource lain (`users`/`categories`/`brands`/`products`/`suppliers` pakai `is_active=false`),
+  cuma di `stock_items` ditandai lewat nilai `status` baru, `ARCHIVED`, karena `status` di sini
+  sudah jadi state machine tersendiri (`AVAILABLE`/`SOLD`/`VOID`/`ARCHIVED`). Unit `AVAILABLE`
+  **maupun** `SOLD` bisa diarsipkan — termasuk unit yang sudah pernah terjual, `sold_at`-nya
+  tetap dipertahankan apa adanya (cuma `status` yang berubah) buat jejak kapan dia laku. Unit
+  `VOID`, atau yang sudah `ARCHIVED` sebelumnya, **tidak bisa** diarsipkan lagi (409). Guard-nya
+  di level SQL (`UPDATE stock_items SET status='ARCHIVED' WHERE public_id = $1 AND status IN
+  ('AVAILABLE', 'SOLD')`), bukan cuma cek-lalu-update di level aplikasi — kalau tidak ada baris
+  ke-update, baru dicek ulang buat bedain "tidak ada" (404) vs "ada tapi VOID/sudah ARCHIVED"
+  (409). Baris `stock_items`-nya **tidak pernah dihapus dari DB** (ini bukan hard delete) — jadi
+  `GET /api/stock-items/{id}` tetap 200 sesudahnya, dengan `status: "ARCHIVED"`.
+  **Cancel selalu menang atas archive**: `POST /api/transactions/{id}/cancel` (`SELL`/
+  `SELL_SUPPLIER` maupun `BUY`) tetap **selalu berhasil** dan nge-overwrite status unit itu
+  balik ke `AVAILABLE` (`SELL`/`SELL_SUPPLIER`) atau `VOID` (`BUY`) **apapun status unitnya saat
+  itu** — termasuk kalau udah `ARCHIVED`. Sengaja begitu: cancel itu aksi resmi yang membatalkan
+  efek transaksinya, jadi kalau transaksi yang bikin unit itu "mati" (terjual/dibeli) dibatalkan,
+  unitnya emang seharusnya hidup lagi — archive yang nempel sebelumnya bukan alasan buat nolak
+  itu. Konsekuensinya: kalau admin **beneran** mau unit tertentu diarsipkan permanen (gak
+  kebalikin otomatis kalau suatu saat transaksinya di-cancel), urutannya harus **cancel dulu, baru
+  arsipkan** — bukan sebaliknya. `BUY` tetap ditolak (409) kalau unitnya sudah `SOLD` (kejual lagi
+  ke transaksi lain) — itu gak berubah, cuma soal `ARCHIVED` yang sekarang gak lagi diblokir.
+- **Tidak lagi ditolak cuma karena unit masih direferensikan tabel lain** — sebelumnya ini hard
+  `DELETE`, dan unit `AVAILABLE` yang masih ada baris `transaction_items` (mis. hasil `BUY`
+  buyback yang belum terjual lagi) atau `stock_opname_items` (pernah discan di sesi opname) bikin
+  Postgres nolak di level FK (`transaction_items`/`stock_opname_items` FK ke `stock_items.id`
+  tanpa `ON DELETE CASCADE`). Karena sekarang `UPDATE` bukan `DELETE`, baris itu tidak pernah
+  hilang, jadi FK itu tidak pernah kena — kasus-kasus itu sekarang **berhasil** diarsipkan (200).
+- **`GET .../stock-items` (list per produk) sembunyikan unit `ARCHIVED` maupun `VOID` secara
+  default** — tanpa `?status=`, list tetap nampilin histori penuh (`AVAILABLE` + `SOLD`, sama
+  seperti sebelumnya) tapi bukan dua status "mati" itu, konsisten sama pola resource lain yang
+  nyembunyiin baris `is_active=false` dari list default. `VOID` (unit hasil `BUY` yang
+  transaksinya di-cancel) **tidak bisa** ditransisi jadi `ARCHIVED` — tetap status tersendiri
+  biar alasan "kenapa unit ini mati" (buyback-nya batal, bukan sengaja diarsipkan admin) tidak
+  hilang; `DELETE` ke unit `VOID` ditolak 409. Eksplisit `?status=ARCHIVED` atau `?status=VOID`
+  tetap bisa narik masing-masing (mis. buat tampilan audit).
 - **Validasi create pakai status `422`** (`Unprocessable Entity`), bukan `400` seperti endpoint
   lain — `serial_number`, `condition` (harus `GOOD`/`BAD`), `purchase_price` (harus `> 0`), dan
   `purchase_date` (format `YYYY-MM-DD`) semua wajib diisi & valid, kalau tidak → 422.
@@ -772,8 +794,8 @@ DELETE /api/stock-items/{id}                   # HARD delete, hanya unit AVAILAB
 - **`PUT` mengunci `barcode` dan `product_id`** — kolom itu sengaja tidak ada di query `UPDATE`,
   persis pola SKU produk yang immutable (BE-203). Field yang bisa diedit: `serial_number`,
   `condition`, `purchase_price`, `purchase_date`, `production_year`, `notes`. Unit yang `SOLD`
-  ditolak (409) — guard-nya fetch-lalu-cek di service (bukan level SQL seperti `DELETE`, karena
-  edit bukan operasi destruktif tanpa-undo).
+  atau `ARCHIVED` ditolak (409) — guard-nya fetch-lalu-cek di service (bukan level SQL seperti
+  `DELETE`, karena edit bukan operasi destruktif tanpa-undo).
 - **`production_year`** (migrasi `000025`) — tahun produksi/cetak unit fisik, **opsional**
   (`null` kalau tidak diisi, bukan wajib seperti `serial_number`/`condition`). Kalau diisi, harus
   angka masuk akal (2000 s.d. tahun berjalan + 1), kalau tidak → 422, sama tier validasinya
@@ -797,8 +819,8 @@ Dipakai kasir buat scan barcode fisik pas nambahin item ke keranjang jual. `?bar
 response punya `"requires_confirmation": true` supaya klien nampilin konfirmasi **sebelum** unit
 itu masuk keranjang. `type=SELL_SUPPLIER` atau `?type` dikosongkan → `requires_confirmation`
 selalu `false` (jual ke supplier tidak butuh konfirmasi kondisi). Barcode tidak ditemukan → 404;
-unit yang sudah `SOLD` → 409. Field `condition` selalu ada di response biar klien juga bisa decide
-sendiri kalau perlu.
+unit yang sudah `SOLD` atau `ARCHIVED` → 409. Field `condition` selalu ada di response biar klien
+juga bisa decide sendiri kalau perlu.
 
 ```bash
 GET /api/stock-items/lookup?barcode=00000001&type=SELL
@@ -877,10 +899,13 @@ Contoh response error:
 // 400 — create ke produk yang sudah diarsipkan
 {"success":false,"error":{"code":"BAD_REQUEST","message":"produk sudah diarsipkan, tidak bisa menambah stok"}}
 
-// 409 — update/delete unit yang sudah SOLD
+// 409 — edit unit yang sudah SOLD atau ARCHIVED (edit tetap diblokir buat keduanya, beda dari archive)
 {"success":false,"error":{"code":"CONFLICT","message":"unit sudah terjual (SOLD), tidak bisa diedit"}}
-{"success":false,"error":{"code":"CONFLICT","message":"unit sudah terjual (SOLD), tidak bisa dihapus"}}
-{"success":false,"error":{"code":"CONFLICT","message":"unit stok sudah tercatat di transaksi atau stock opname, tidak bisa dihapus"}}
+{"success":false,"error":{"code":"CONFLICT","message":"unit sudah diarsipkan, tidak bisa diedit"}}
+
+// 409 — arsipkan unit yang VOID atau sudah ARCHIVED sebelumnya (AVAILABLE & SOLD berhasil diarsipkan)
+{"success":false,"error":{"code":"CONFLICT","message":"unit sudah void (dibatalkan), tidak bisa diarsipkan"}}
+{"success":false,"error":{"code":"CONFLICT","message":"unit sudah diarsipkan sebelumnya"}}
 
 // 404 — {productId} atau {id} tidak ditemukan
 {"success":false,"error":{"code":"NOT_FOUND","message":"produk tidak ditemukan"}}
@@ -1174,7 +1199,7 @@ PO jadi `status=DITERIMA` + `received_at` terisi. PO yang sudah `DITERIMA`/`DIBA
 bisa di-receive lagi → 409.
 
 `POST /{id}/cancel` cuma bisa dari `status=BELUM_DITERIMA` → `DIBATALKAN` (guard di level SQL,
-pola yang sama dengan hard-delete `stock_items` di BE-504); PO yang sudah `DITERIMA` atau
+pola yang sama dengan archive `stock_items` di BE-504); PO yang sudah `DITERIMA` atau
 `DIBATALKAN` → 409.
 
 **Validasi**: field item `POST` (`product_id`/`quantity`/`purchase_price`) pakai tier `400` (di
@@ -1336,8 +1361,9 @@ filter ini akan selalu balik list kosong sampai ada fitur cancel opname).
 `POST /{id}/scan` mencatat satu kali scan barcode fisik ke `stock_opname_items`:
 - Barcode dikenal & `stock_items.status=AVAILABLE` → `system_status=AVAILABLE`,
   `physical_status=FOUND`, `result=MATCH`.
-- Barcode dikenal tapi `stock_items.status=SOLD` (unit yang menurut sistem sudah tidak seharusnya
-  ada secara fisik, tapi ternyata discan) → `result=UNEXPECTED`.
+- Barcode dikenal tapi `stock_items.status` bukan `AVAILABLE` (`SOLD`, `VOID`, atau `ARCHIVED` —
+  unit yang menurut sistem sudah tidak seharusnya ada secara fisik, tapi ternyata discan) →
+  `result=UNEXPECTED`, `system_status` ikut nilai status unit itu apa adanya.
 - **Barcode sama sekali tidak dikenal** (tidak ada baris `stock_items` yang cocok) → **ditolak
   404** (`"barcode tidak ditemukan"`, pesan yang sama dengan `GET /stock-items/lookup`), **bukan**
   dicatat sebagai `UNEXPECTED` — `stock_opname_items.stock_item_id` adalah FK `NOT NULL`, jadi unit
@@ -2029,7 +2055,7 @@ Dua lapis test:
   `items: []` (bukan error); supplier tidak ditemukan → 404; format id bukan UUID → 400
 
 **`stock_items_test.go`** — `/api/products/{productId}/stock-items` & `/api/stock-items`
-(BE-501 create, BE-502 list/detail, BE-503 update, BE-504 hard delete, BE-505 label)
+(BE-501 create, BE-502 list/detail, BE-503 update, BE-504 archive, BE-505 label)
 - `POST` (ADMIN & SUPER_ADMIN): tanpa token → 401; role KASIR → 403
 - Create → `barcode` 8 digit angka (`nextval('stock_items_barcode_seq')`), `status == "AVAILABLE"`;
   dua unit (produk sama maupun beda) → barcode berbeda & naik terus, bukan lagi per-produk
@@ -2042,16 +2068,35 @@ Dua lapis test:
 - List: filter `?status=`/`?condition=` menyempitkan hasil dengan benar (unit `SOLD` di-set
   langsung lewat SQL di test — belum ada endpoint "mark as sold"); `?search=` cocok ke
   `serial_number`; `?limit=&page=` paginasi dengan benar
+- List: tanpa `?status=`, unit `ARCHIVED` maupun `VOID` (hasil `BUY` yang di-cancel) **tidak** ikut
+  muncul (beda dari `SOLD` yang tetap muncul di list default); eksplisit `?status=ARCHIVED` atau
+  `?status=VOID` tetap bisa narik masing-masing
 - Detail: response mengandung `barcode` lengkap; id bukan UUID → 400; tidak ditemukan → 404
 - `PUT` (ADMIN & SUPER_ADMIN): mengubah `serial_number`/`condition`/`purchase_price`/
   `purchase_date`/`notes`, tapi **`barcode` dan `product.id` tetap sama** — inti acceptance
   criteria BE-503
-- `PUT` ke unit yang sudah `SOLD` (lewat SQL) → 409; `{id}` tidak ditemukan → 404; field
-  invalid → 422
-- `DELETE` (ADMIN & SUPER_ADMIN) unit `AVAILABLE` → 200, lalu `GET /{id}` setelahnya → **404**
-  (kolomnya beneran hilang dari DB — hard delete, bukan soft delete kayak resource lain)
-- `DELETE` unit yang sudah `SOLD` → 409, unit tetap ada setelahnya (guard di level SQL
-  `AND status = 'AVAILABLE'` di `stock_item_repository.go`, bukan cuma cek aplikasi)
+- `PUT` ke unit yang sudah `SOLD` (lewat SQL) atau `ARCHIVED` (lewat `DELETE`) → 409; `{id}` tidak
+  ditemukan → 404; field invalid → 422
+- `DELETE` (ADMIN & SUPER_ADMIN) unit `AVAILABLE` → 200, lalu `GET /{id}` setelahnya tetap
+  **200** dengan `status: "ARCHIVED"` (baris tidak dihapus dari DB — ini `UPDATE`, bukan hard
+  delete)
+- `DELETE` unit yang sudah `SOLD` (di-set langsung lewat SQL fixture, termasuk `sold_at`) → juga
+  **berhasil** (200), `GET` setelahnya → `status: "ARCHIVED"` **dan** `sold_at` tetap sama persis
+  kayak sebelum diarsipkan (guard di level SQL `AND status IN ('AVAILABLE', 'SOLD')` di
+  `stock_item_repository.go`, bukan cuma cek aplikasi)
+- `DELETE` unit yang sudah `ARCHIVED` sebelumnya → 409 (`"unit sudah diarsipkan sebelumnya"`);
+  `DELETE` unit `VOID` (hasil `BUY` yang di-cancel, lewat `POST /api/transactions/{id}/cancel`) →
+  409 juga (`"unit sudah void (dibatalkan), tidak bisa diarsipkan"`) — `VOID` sengaja tidak bisa
+  ditransisi jadi `ARCHIVED`
+- `DELETE` unit `AVAILABLE` yang masih direferensikan `transaction_items` (hasil `BUY` yang
+  belum terjual lagi) atau `stock_opname_items` (pernah discan di sesi opname) → **berhasil**
+  (200) — beda dari perilaku hard-delete lama yang ditolak 409 karena FK; `UPDATE` tidak pernah
+  melanggar FK karena barisnya tidak hilang
+- Unit `SOLD` yang diarsipkan setelahnya, transaksi `SELL`/`SELL_SUPPLIER` yang menjualnya dicoba
+  di-cancel (`POST /api/transactions/{id}/cancel`, lihat `transactions_test.go`) → **berhasil**
+  (200), unit balik ke `AVAILABLE` — cancel selalu menang atas archive, arsipnya ke-overwrite;
+  sama halnya buat unit hasil `BUY` yang diarsipkan lalu BUY-nya di-cancel → unit jadi `VOID`
+  (bukan diblokir)
 - `GET /{id}/label` mengembalikan `barcode`/`product_name`/`weight_gram`/`serial_number`;
   tetap 200 untuk unit yang sudah `SOLD` (cetak ulang diperbolehkan); tidak ditemukan → 404
 
@@ -2074,7 +2119,7 @@ Dua lapis test:
 **`stock_items_test.go`** (tambahan) — `GET /api/stock-items/lookup` (BE-701/BE-703)
 - Tanpa token → 401
 - Barcode ditemukan & `AVAILABLE` → 200, response berisi unit + produk + `condition`
-- Barcode tidak ditemukan → 404; unit sudah `SOLD` → 409
+- Barcode tidak ditemukan → 404; unit sudah `SOLD` atau `ARCHIVED` → 409
 - `?type=SELL` + unit `condition=BAD` → `requires_confirmation: true`
 - `?type=SELL_SUPPLIER` + unit `condition=BAD` → `requires_confirmation: false`
 - `?type` dikosongkan + unit `condition=BAD` → `requires_confirmation: false`
@@ -2088,6 +2133,7 @@ Dua lapis test:
 - `type=SELL` tanpa `customer_id` → 400
 - Dua transaksi di hari yang sama → `transaction_code` urut naik (`-0001`, `-0002`)
 - Jual unit yang sama dua kali (request kedua) → 409, transaksi pertama tidak terganggu
+- Jual unit yang sudah `ARCHIVED` (lewat `DELETE /api/stock-items/{id}`) → 409
 - **Dua request konkuren menjual unit yang sama** (goroutine, bukan raw `doRequest` di dalam
   goroutine — `t.Fatalf` tidak boleh dipanggil dari goroutine selain punya test) → tepat satu
   `201` dan satu `409`, diverifikasi berulang (`-count=5`) — bukti `FOR UPDATE` beneran
@@ -2166,7 +2212,10 @@ Dua lapis test:
   tersimpan, `items[]` masih kosong; dua sesi di hari yang sama → `opname_code` urut naik
 - `POST /{id}/scan` unit `AVAILABLE` yang dikenal → `result=MATCH`, `physical_status=FOUND`; unit
   yang statusnya `SOLD` (di-set langsung lewat SQL fixture) → `result=UNEXPECTED`,
-  `system_status=SOLD`; barcode yang sama sekali tidak dikenal → 404; `barcode` kosong → 400; unit
+  `system_status=SOLD`; unit yang `ARCHIVED` (lewat `DELETE /api/stock-items/{id}`) →
+  `result=UNEXPECTED`, `system_status=ARCHIVED` (regresi-guard buat
+  `stock_opname_items.system_status` CHECK constraint yang sempat cuma mengizinkan
+  `AVAILABLE`/`SOLD`); barcode yang sama sekali tidak dikenal → 404; `barcode` kosong → 400; unit
   yang sama discan dua kali dalam satu sesi → 409 (scan pertama tidak terganggu); sesi `{id}` tidak
   ditemukan → 404; scan terhadap sesi yang sudah `COMPLETED` → 409
 - `POST /{id}/complete`: sesi dengan 2 unit `AVAILABLE` (1 discan, 1 tidak) → 200,

@@ -111,6 +111,27 @@ func TestTransactions_CreateSellToCustomer(t *testing.T) {
 	}
 }
 
+func TestTransactions_CreateSellArchivedUnitRejected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItem.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("sell archived unit: expected 409, got %d (resp=%+v)", status, resp)
+	}
+}
+
 func TestTransactions_CreateSellToSupplierRequiresSupplierID(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
@@ -1181,6 +1202,98 @@ func TestTransactions_CancelBuyAlreadyResoldRejected(t *testing.T) {
 	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+buyTx.ID+"/cancel", nil, adminToken)
 	if status != http.StatusConflict {
 		t.Fatalf("cancel buy of already-resold unit: expected 409, got %d (resp=%+v)", status, resp)
+	}
+}
+
+// TestTransactions_CancelSellArchivedUnitRevertsToAvailable covers cancel
+// winning over an in-between archive: a unit sold, then archived, then
+// un-cancelled (its SELL cancelled) must revert straight back to AVAILABLE
+// — same as the never-archived case — because cancelling the sale is
+// exactly what should bring dead stock back to life. Anyone wanting a unit
+// permanently gone needs to cancel first, then archive, not the other way
+// around.
+func TestTransactions_CancelSellArchivedUnitRevertsToAvailable(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItem.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("archive sold unit: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+tx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("cancel sell of archived unit: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var cancelled transactionDTO
+	decodeData(t, resp, &cancelled)
+	if cancelled.Status != "CANCELLED" {
+		t.Fatalf("expected status CANCELLED, got %q", cancelled.Status)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+stockItem.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get stock item: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockItemDTO
+	decodeData(t, resp, &fetched)
+	if fetched.Status != "AVAILABLE" {
+		t.Fatalf("expected unit AVAILABLE again after cancel, got %q (archive should be overridden by cancel)", fetched.Status)
+	}
+}
+
+// TestTransactions_CancelBuyArchivedUnitVoids mirrors the SELL case above
+// for BUY: a unit archived after its originating buy falls through to VOID
+// on cancel, same as a never-archived unit — only an actually-resold unit
+// (SOLD) still blocks the cancel.
+func TestTransactions_CancelBuyArchivedUnitVoids(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "ARCHIVED-BUY-SN", "condition": "GOOD", "price_total": 900000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("buy: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var buyTx transactionDTO
+	decodeData(t, resp, &buyTx)
+	stockItemID := buyTx.Items[0].StockItemID
+
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItemID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+buyTx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("cancel buy of archived unit: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+stockItemID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get stock item: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockItemDTO
+	decodeData(t, resp, &fetched)
+	if fetched.Status != "VOID" {
+		t.Fatalf("expected unit VOID after cancel (archive overridden by cancel), got %q", fetched.Status)
 	}
 }
 

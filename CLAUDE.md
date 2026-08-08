@@ -85,10 +85,32 @@ Repository queries always `SELECT ... public_id::text ...` (explicit cast for sa
 
 ### Soft delete vs hard delete
 
-Every resource is soft-deleted (`is_active=false`) **except** `stock_items`, which is hard-deleted
-— and only when `status='AVAILABLE'` (guarded at the SQL level: `DELETE ... WHERE public_id = $1
-AND status = 'AVAILABLE'`, then a follow-up check distinguishes 404 "not found" from 409 "exists
-but SOLD"). Sold units must stay in the DB permanently for historical transaction integrity.
+Every resource is soft-deleted. Most use `is_active=false`; `stock_items` instead uses a fourth
+`status` value, `ARCHIVED` (`DELETE /api/stock-items/{id}` maps to an `UPDATE ... SET
+status='ARCHIVED' WHERE public_id = $1 AND status IN ('AVAILABLE', 'SOLD')`, guarded at the SQL
+level — a follow-up check distinguishes 404 "not found" from 409 "exists but VOID or already
+ARCHIVED"). This used to be a real hard `DELETE` restricted to `AVAILABLE` units, but that broke as
+soon as the unit was referenced by `transaction_items` (e.g. a BUY-created unit not yet resold) or
+`stock_opname_items` (scanned in a session) — both are `NOT NULL` FKs with no cascade, so the
+delete hit a foreign-key violation. Archiving sidesteps that entirely since the row never
+disappears — which also made it safe to extend archiving to `SOLD` units too (the row, and every
+FK pointing at it, survives regardless); `sold_at` is left untouched by the archive so the sale
+timestamp isn't lost. `ListByProduct` hides `ARCHIVED` **and** `VOID` units from the default (no
+`?status=`) listing — both are "dead" statuses no longer real stock — same as every other resource
+hides `is_active=false` rows, but an explicit `?status=ARCHIVED`/`?status=VOID` still returns them.
+`VOID` (set when a BUY transaction is cancelled, see Transactions below) is never allowed to
+transition into `ARCHIVED` — it stays a distinct terminal status so *why* the unit is dead
+(cancelled buyback vs. deliberately archived) isn't lost. Sold units must stay in the DB
+permanently for historical transaction integrity — same for archived/void ones. **Cancel always
+wins over archive**: `Cancel` (`transaction_repository.go`) unconditionally overwrites a referenced
+stock item's status back to `AVAILABLE` (`SELL`/`SELL_SUPPLIER`) or `VOID` (`BUY`, unless it's
+`SOLD` — actually resold, which still blocks the cancel) regardless of whether it's currently
+`ARCHIVED` — cancelling the transaction that made a unit dead stock is exactly what should bring it
+back, so an in-between archive doesn't get special treatment; it's simply overwritten. The
+consequence is intentional: there's no restore/unarchive endpoint for `stock_items` (unlike
+`products`, which reactivates via `PUT` with `is_active: true`), so a *permanent* archive of a
+`SOLD` unit requires cancelling its sale first, then archiving — archiving before cancelling is not
+durable.
 
 ### Auto-generated codes (same pattern repeated across resources)
 

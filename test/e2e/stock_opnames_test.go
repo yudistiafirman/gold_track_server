@@ -303,6 +303,36 @@ func TestStockOpnames_ScanSoldUnitIsUnexpected(t *testing.T) {
 	}
 }
 
+// TestStockOpnames_ScanArchivedUnitIsUnexpected also guards against a
+// regression of the stock_opname_items.system_status CHECK constraint,
+// which used to only allow ('AVAILABLE', 'SOLD') — scanning a non-AVAILABLE,
+// non-SOLD unit (ARCHIVED, or VOID before this fix) would violate that
+// constraint and 500 instead of recording a clean UNEXPECTED result.
+func TestStockOpnames_ScanArchivedUnitIsUnexpected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItem.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	opname := createStockOpname(t, adminToken)
+	status, resp = doRequest(t, http.MethodPost, "/api/stock-opnames/"+opname.ID+"/scan", map[string]any{"barcode": stockItem.Barcode}, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var item stockOpnameItemDTO
+	decodeData(t, resp, &item)
+
+	if item.Result != "UNEXPECTED" || item.SystemStatus != "ARCHIVED" {
+		t.Fatalf("expected result UNEXPECTED system_status ARCHIVED, got %+v", item)
+	}
+}
+
 func TestStockOpnames_ScanUnknownBarcodeNotFound(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)

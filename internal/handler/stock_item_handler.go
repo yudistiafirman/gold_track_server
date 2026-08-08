@@ -275,9 +275,10 @@ func (h *StockItemHandler) Update(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, toStockItemResponse(result))
 }
 
-// Delete hard-deletes the target stock item — unlike every other resource
-// in this API, there is no soft-delete here; the guard (only AVAILABLE
-// units can be removed) lives at the SQL level in the repository.
+// Delete archives the target stock item (status -> ARCHIVED) rather than
+// removing the row — the guard (only AVAILABLE units can be archived) lives
+// at the SQL level in the repository. Unlike a hard delete, the row (and
+// any transaction_items/stock_opname_items referencing it) stays intact.
 func (h *StockItemHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id, err := publicIDParam(r)
 	if err != nil {
@@ -290,7 +291,7 @@ func (h *StockItemHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response.JSON(w, http.StatusOK, map[string]string{"message": "unit stok dihapus"})
+	response.JSON(w, http.StatusOK, map[string]string{"message": "unit stok diarsipkan"})
 }
 
 // productIDParam reads chi's "productId" path param — distinct from the

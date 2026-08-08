@@ -29,13 +29,6 @@ var ErrStockItemNotFound = errors.New("stock item not found")
 // number is a genuine client error, not a race to recompute past.
 var ErrSerialNumberTaken = errors.New("serial number already in use")
 
-// ErrStockItemReferenced is returned when a hard-delete is rejected because
-// the unit is still referenced by transaction_items (e.g. a BUY-created
-// unit that hasn't been resold yet) or stock_opname_items (a unit that was
-// scanned in a stock opname session) — deleting it would leave that row
-// pointing at nothing, breaking the transaction/audit trail.
-var ErrStockItemReferenced = errors.New("stock item still referenced by a transaction or stock opname")
-
 // uqStockItemsSerialNumber matches the partial unique index (migration
 // 000028) that only enforces uniqueness among AVAILABLE units — a serial
 // number becomes reusable once its unit is SOLD.
@@ -69,7 +62,7 @@ type StockItemWithRefs struct {
 }
 
 type StockItemFilter struct {
-	Status    *string // AVAILABLE | SOLD, nil = no filter
+	Status    *string // AVAILABLE | SOLD | VOID | ARCHIVED, nil = no filter (still excludes VOID/ARCHIVED by default)
 	Condition *string // GOOD | BAD, nil = no filter
 	Search    string  // ILIKE on serial_number
 	Page      int
@@ -111,10 +104,13 @@ type StockItemRepository interface {
 	// production_year/notes and bumps updated_at — barcode and product_id are deliberately never in
 	// the SET clause, so they cannot change regardless of what else is edited.
 	Update(ctx context.Context, s *model.StockItem) error
-	// Delete hard-deletes, guarded at the SQL level — only succeeds if the
-	// row is still AVAILABLE at the moment of deletion. Returns whether a
-	// row was actually removed so the caller can disambiguate "not found"
-	// from "exists but not AVAILABLE".
+	// Delete archives the unit (status -> ARCHIVED) rather than removing the
+	// row, guarded at the SQL level — only succeeds if the row is currently
+	// AVAILABLE or SOLD at the moment of archiving (VOID and already-ARCHIVED
+	// units cannot be re-archived). sold_at is left untouched, so a unit
+	// archived after being sold still remembers when it sold. Returns
+	// whether a row was actually updated so the caller can disambiguate
+	// "not found" from "exists but VOID/already ARCHIVED".
 	Delete(ctx context.Context, publicID string) (bool, error)
 }
 
@@ -218,6 +214,15 @@ func (r *stockItemRepository) ListByProduct(ctx context.Context, productID int64
 	if filter.Status != nil {
 		args = append(args, *filter.Status)
 		conditions = append(conditions, fmt.Sprintf("si.status = $%d", len(args)))
+	} else {
+		// No explicit status filter — show full history (AVAILABLE, SOLD)
+		// but hide the two "dead" statuses: ARCHIVED (admin removed it) and
+		// VOID (its originating BUY was cancelled, so it was never
+		// legitimately in stock). Both stay reachable via an explicit
+		// ?status=, same as how archived/inactive rows are hidden from
+		// every other resource's default list but still directly
+		// queryable.
+		conditions = append(conditions, "si.status NOT IN ('ARCHIVED', 'VOID')")
 	}
 	if filter.Condition != nil {
 		args = append(args, *filter.Condition)
@@ -281,13 +286,10 @@ func (r *stockItemRepository) Update(ctx context.Context, s *model.StockItem) er
 }
 
 func (r *stockItemRepository) Delete(ctx context.Context, publicID string) (bool, error) {
-	const query = `DELETE FROM stock_items WHERE public_id = $1 AND status = 'AVAILABLE'`
+	const query = `UPDATE stock_items SET status = 'ARCHIVED', updated_at = now() WHERE public_id = $1 AND status IN ('AVAILABLE', 'SOLD')`
 	tag, err := r.db.Exec(ctx, query, publicID)
 	if err != nil {
-		if isForeignKeyViolation(err) {
-			return false, ErrStockItemReferenced
-		}
-		return false, fmt.Errorf("delete stock item: %w", err)
+		return false, fmt.Errorf("archive stock item: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
 }

@@ -28,6 +28,8 @@ var allowedConditions = map[string]struct{}{
 var allowedStockStatuses = map[string]struct{}{
 	"AVAILABLE": {},
 	"SOLD":      {},
+	"ARCHIVED":  {},
+	"VOID":      {},
 }
 
 // StockItemSummary is the public-facing view of a stock item: only
@@ -212,7 +214,7 @@ func (s *stockItemService) List(ctx context.Context, input ListStockItemsInput) 
 
 	if input.Status != "" {
 		if _, ok := allowedStockStatuses[input.Status]; !ok {
-			return StockItemListResult{}, apperror.BadRequest("status harus AVAILABLE atau SOLD", nil)
+			return StockItemListResult{}, apperror.BadRequest("status harus AVAILABLE, SOLD, VOID, atau ARCHIVED", nil)
 		}
 		status := input.Status
 		filter.Status = &status
@@ -292,6 +294,9 @@ func (s *stockItemService) Update(ctx context.Context, input UpdateStockItemInpu
 	if existing.Status == "SOLD" {
 		return StockItemSummary{}, apperror.Conflict("unit sudah terjual (SOLD), tidak bisa diedit", nil)
 	}
+	if existing.Status == "ARCHIVED" {
+		return StockItemSummary{}, apperror.Conflict("unit sudah diarsipkan, tidak bisa diedit", nil)
+	}
 
 	existing.SerialNumber = serialNumber
 	existing.Condition = input.Condition
@@ -311,25 +316,32 @@ func (s *stockItemService) Update(ctx context.Context, input UpdateStockItemInpu
 }
 
 func (s *stockItemService) Delete(ctx context.Context, publicID string) error {
-	deleted, err := s.stockItemRepo.Delete(ctx, publicID)
+	archived, err := s.stockItemRepo.Delete(ctx, publicID)
 	if err != nil {
-		if errors.Is(err, repository.ErrStockItemReferenced) {
-			return apperror.Conflict("unit stok sudah tercatat di transaksi atau stock opname, tidak bisa dihapus", nil)
-		}
-		return apperror.Internal("failed to delete stock item", err)
+		return apperror.Internal("failed to archive stock item", err)
 	}
-	if deleted {
+	if archived {
 		return nil
 	}
 
-	// Not deleted — disambiguate "doesn't exist" (404) from "exists but SOLD" (409).
-	if _, err := s.stockItemRepo.FindByPublicID(ctx, publicID); err != nil {
+	// Not archived — disambiguate "doesn't exist" (404) from "exists but not
+	// AVAILABLE/SOLD" (409). Only VOID and already-ARCHIVED can land here:
+	// AVAILABLE and SOLD both succeed above.
+	existing, err := s.stockItemRepo.FindByPublicID(ctx, publicID)
+	if err != nil {
 		if errors.Is(err, repository.ErrStockItemNotFound) {
 			return apperror.NotFound("unit stok tidak ditemukan", nil)
 		}
 		return apperror.Internal("failed to fetch stock item", err)
 	}
-	return apperror.Conflict("unit sudah terjual (SOLD), tidak bisa dihapus", nil)
+	switch existing.Status {
+	case "ARCHIVED":
+		return apperror.Conflict("unit sudah diarsipkan sebelumnya", nil)
+	case "VOID":
+		return apperror.Conflict("unit sudah void (dibatalkan), tidak bisa diarsipkan", nil)
+	default:
+		return apperror.Conflict("unit tidak bisa diarsipkan", nil)
+	}
 }
 
 func (s *stockItemService) Lookup(ctx context.Context, barcode, transactionType string) (StockItemSummary, bool, error) {
@@ -340,7 +352,10 @@ func (s *stockItemService) Lookup(ctx context.Context, barcode, transactionType 
 		}
 		return StockItemSummary{}, false, apperror.Internal("failed to fetch stock item", err)
 	}
-	if item.Status == "SOLD" {
+	if item.Status != "AVAILABLE" {
+		if item.Status == "ARCHIVED" {
+			return StockItemSummary{}, false, apperror.Conflict("unit sudah diarsipkan", nil)
+		}
 		return StockItemSummary{}, false, apperror.Conflict("unit sudah terjual (SOLD)", nil)
 	}
 

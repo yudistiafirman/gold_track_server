@@ -266,6 +266,8 @@ func (s *transactionService) CreateSale(ctx context.Context, input CreateSaleInp
 		switch {
 		case errors.Is(err, repository.ErrStockItemUnavailableForSale):
 			return TransactionSummary{}, apperror.Conflict("unit sudah terjual (SOLD), tidak bisa dijual", nil)
+		case errors.Is(err, repository.ErrStockItemArchivedForSale):
+			return TransactionSummary{}, apperror.Conflict("unit sudah diarsipkan, tidak bisa dijual", nil)
 		case errors.Is(err, repository.ErrConfirmationRequired):
 			return TransactionSummary{}, apperror.Conflict("unit kondisi BAD perlu konfirmasi (confirmed=true) untuk dijual ke pelanggan", nil)
 		case errors.Is(err, repository.ErrTransactionCodeGenerationFailed):

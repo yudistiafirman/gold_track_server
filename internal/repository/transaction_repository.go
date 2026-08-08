@@ -18,6 +18,11 @@ import (
 // as-is; the service maps it to a 409.
 var ErrStockItemUnavailableForSale = errors.New("stock item unavailable for sale")
 
+// ErrStockItemArchivedForSale is the ErrStockItemUnavailableForSale case
+// specifically for an ARCHIVED unit — split out so the service can report
+// an accurate reason instead of implying the unit was SOLD.
+var ErrStockItemArchivedForSale = errors.New("stock item archived, cannot sell")
+
 // ErrConfirmationRequired is returned when a BAD-condition unit is being
 // sold to a customer (type SELL) without item.Confirmed set.
 var ErrConfirmationRequired = errors.New("confirmation required for BAD condition unit")
@@ -251,6 +256,9 @@ func (r *transactionRepository) trySale(ctx context.Context, input CreateSaleInp
 		}
 
 		if status != "AVAILABLE" {
+			if status == "ARCHIVED" {
+				return nil, nil, ErrStockItemArchivedForSale
+			}
 			return nil, nil, ErrStockItemUnavailableForSale
 		}
 		if input.Type == "SELL" && condition == "BAD" && !item.Confirmed {
@@ -679,12 +687,16 @@ func (r *transactionRepository) Cancel(ctx context.Context, publicID string) (*m
 	rows.Close()
 
 	if txType == "BUY" {
+		// Cancel wins over an in-between archive: a unit archived after this
+		// BUY (still AVAILABLE or now ARCHIVED) just falls through to VOID
+		// same as the normal case — only an actually-resold unit (SOLD)
+		// blocks the cancel, since the shop no longer has it to give back.
 		for _, id := range stockItemIDs {
 			var itemStatus string
 			if err := tx.QueryRow(ctx, `SELECT status FROM stock_items WHERE id = $1 FOR UPDATE`, id).Scan(&itemStatus); err != nil {
 				return nil, fmt.Errorf("lock stock item for buy cancel: %w", err)
 			}
-			if itemStatus != "AVAILABLE" {
+			if itemStatus == "SOLD" {
 				return nil, ErrStockItemAlreadyResold
 			}
 			if _, err := tx.Exec(ctx, `UPDATE stock_items SET status = 'VOID', updated_at = now() WHERE id = $1`, id); err != nil {
@@ -692,6 +704,12 @@ func (r *transactionRepository) Cancel(ctx context.Context, publicID string) (*m
 			}
 		}
 	} else {
+		// Cancel wins over an in-between archive here too — reverting
+		// straight back to AVAILABLE regardless of the unit's current
+		// status is intentional: cancelling the sale that made it dead
+		// stock is exactly what should bring it back to life. Anyone who
+		// wants a unit permanently out of circulation needs to cancel
+		// first, then archive — not the other way around.
 		for _, id := range stockItemIDs {
 			const query = `UPDATE stock_items SET status = 'AVAILABLE', sold_at = NULL, updated_at = now() WHERE id = $1`
 			if _, err := tx.Exec(ctx, query, id); err != nil {

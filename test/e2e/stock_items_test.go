@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"testing"
+	"time"
 )
 
 type stockItemProductDTO struct {
@@ -23,6 +24,7 @@ type stockItemDTO struct {
 	PurchaseDate   string              `json:"purchase_date"`
 	ProductionYear *int                `json:"production_year"`
 	Status         string              `json:"status"`
+	SoldAt         *time.Time          `json:"sold_at"`
 	Notes          string              `json:"notes"`
 }
 
@@ -71,11 +73,12 @@ func createStockItemAPI(t *testing.T, adminToken, productID string, body map[str
 	return s
 }
 
-// markStockItemSold flips status directly via SQL — there's no
-// mark-as-sold endpoint yet (belongs to a future sales ticket).
+// markStockItemSold flips status directly via SQL (mirroring what a real
+// sale sets: status=SOLD plus sold_at) — there's no mark-as-sold endpoint
+// standing alone from a full checkout flow.
 func markStockItemSold(t *testing.T, publicID string) {
 	t.Helper()
-	if _, err := testPool.Exec(context.Background(), `UPDATE stock_items SET status = 'SOLD' WHERE public_id = $1`, publicID); err != nil {
+	if _, err := testPool.Exec(context.Background(), `UPDATE stock_items SET status = 'SOLD', sold_at = now() WHERE public_id = $1`, publicID); err != nil {
 		t.Fatalf("mark stock item sold: %v", err)
 	}
 }
@@ -358,6 +361,73 @@ func TestStockItems_ListFiltersStatusAndCondition(t *testing.T) {
 	_ = good
 }
 
+// TestStockItems_ListHidesDeadStatusesByDefaultButShowsOnExplicitFilter covers
+// both "dead" statuses a unit can end up in outside the normal AVAILABLE/SOLD
+// lifecycle: ARCHIVED (admin removed it) and VOID (its originating BUY was
+// cancelled). Neither is real usable stock, so both are hidden from the
+// default (no ?status=) list — matching how every other resource hides its
+// inactive rows by default — but each stays reachable via an explicit
+// ?status= filter for audit purposes.
+func TestStockItems_ListHidesDeadStatusesByDefaultButShowsOnExplicitFilter(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	kept := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "SN-KEEP"}))
+
+	archived := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "SN-ARC"}))
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+archived.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "SN-VOID", "condition": "GOOD", "price_total": 900000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("buy: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var buyTx transactionDTO
+	decodeData(t, resp, &buyTx)
+	voidedID := buyTx.Items[0].StockItemID
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+buyTx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("cancel buy: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/products/"+product.ID+"/stock-items", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("list: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var unfiltered stockItemListDTO
+	decodeData(t, resp, &unfiltered)
+	if len(unfiltered.Items) != 1 || unfiltered.Items[0].ID != kept.ID {
+		t.Fatalf("expected default list to hide ARCHIVED and VOID units and only show %q, got %+v", kept.ID, unfiltered.Items)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/products/"+product.ID+"/stock-items?status=ARCHIVED", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("list status=ARCHIVED: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var byArchived stockItemListDTO
+	decodeData(t, resp, &byArchived)
+	if len(byArchived.Items) != 1 || byArchived.Items[0].ID != archived.ID {
+		t.Fatalf("expected explicit status=ARCHIVED filter to return %q, got %+v", archived.ID, byArchived.Items)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/products/"+product.ID+"/stock-items?status=VOID", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("list status=VOID: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var byVoid stockItemListDTO
+	decodeData(t, resp, &byVoid)
+	if len(byVoid.Items) != 1 || byVoid.Items[0].ID != voidedID {
+		t.Fatalf("expected explicit status=VOID filter to return %q, got %+v", voidedID, byVoid.Items)
+	}
+}
+
 func TestStockItems_ListSearchBySerial(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
@@ -518,6 +588,24 @@ func TestStockItems_UpdateSoldUnitRejected(t *testing.T) {
 	}
 }
 
+func TestStockItems_UpdateArchivedUnitRejected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodPut, "/api/stock-items/"+created.ID, validStockItemBody(nil), adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409, got %d (resp=%+v)", status, resp)
+	}
+}
+
 func TestStockItems_UpdateNotFound(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
@@ -565,7 +653,7 @@ func TestStockItems_DeleteNonAdminForbidden(t *testing.T) {
 	}
 }
 
-func TestStockItems_DeleteAvailableHardDeletes(t *testing.T) {
+func TestStockItems_DeleteAvailableArchives(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
@@ -578,12 +666,22 @@ func TestStockItems_DeleteAvailableHardDeletes(t *testing.T) {
 	}
 
 	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+created.ID, nil, adminToken)
-	if status != http.StatusNotFound {
-		t.Fatalf("expected 404 after hard delete (row actually gone), got %d (resp=%+v)", status, resp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 after archive (row kept, not hard-deleted), got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockItemDTO
+	decodeData(t, resp, &fetched)
+	if fetched.Status != "ARCHIVED" {
+		t.Fatalf("expected status ARCHIVED after delete, got %q", fetched.Status)
 	}
 }
 
-func TestStockItems_DeleteSoldUnitRejected(t *testing.T) {
+// TestStockItems_DeleteSoldUnitArchives covers archiving a unit that's
+// already SOLD — allowed (unlike VOID), since a completed sale is
+// legitimate history the shop may still want out of the default list.
+// sold_at must survive the archive untouched, since it's the only record of
+// when the unit sold.
+func TestStockItems_DeleteSoldUnitArchives(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
@@ -591,23 +689,88 @@ func TestStockItems_DeleteSoldUnitRejected(t *testing.T) {
 	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
 	markStockItemSold(t, created.ID)
 
-	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
-	if status != http.StatusConflict {
-		t.Fatalf("expected 409, got %d (resp=%+v)", status, resp)
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get before archive: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var beforeArchive stockItemDTO
+	decodeData(t, resp, &beforeArchive)
+
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
 	}
 
 	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+created.ID, nil, adminToken)
 	if status != http.StatusOK {
-		t.Fatalf("expected unit to still exist after blocked delete, got %d (resp=%+v)", status, resp)
+		t.Fatalf("get after archive: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var afterArchive stockItemDTO
+	decodeData(t, resp, &afterArchive)
+	if afterArchive.Status != "ARCHIVED" {
+		t.Fatalf("expected status ARCHIVED, got %q", afterArchive.Status)
+	}
+	if afterArchive.SoldAt == nil || beforeArchive.SoldAt == nil || !afterArchive.SoldAt.Equal(*beforeArchive.SoldAt) {
+		t.Fatalf("expected sold_at to survive archiving unchanged, before=%v after=%v", beforeArchive.SoldAt, afterArchive.SoldAt)
 	}
 }
 
-// TestStockItems_DeleteReferencedByBuyTransactionRejected covers a unit
+func TestStockItems_DeleteAlreadyArchivedRejected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("first archive: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 archiving an already-archived unit, got %d (resp=%+v)", status, resp)
+	}
+}
+
+// TestStockItems_DeleteVoidUnitRejected covers archiving a unit whose
+// originating BUY transaction was cancelled (status VOID) — VOID stays a
+// distinct terminal status (it records *why* the unit isn't real stock),
+// it's never allowed to transition into ARCHIVED.
+func TestStockItems_DeleteVoidUnitRejected(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "SN-VOID-DEL", "condition": "GOOD", "price_total": 900000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("buy: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var buyTx transactionDTO
+	decodeData(t, resp, &buyTx)
+	stockItemID := buyTx.Items[0].StockItemID
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+buyTx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("cancel buy: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItemID, nil, adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 archiving a VOID unit, got %d (resp=%+v)", status, resp)
+	}
+}
+
+// TestStockItems_DeleteReferencedByBuyTransactionSucceeds covers a unit
 // that stays AVAILABLE right after creation but is already referenced by
-// transaction_items (a BUY/buyback line item) — hard-deleting it would
-// leave that transaction item pointing at nothing, so it must be rejected
-// with a clean 409, not a raw foreign-key-violation 500.
-func TestStockItems_DeleteReferencedByBuyTransactionRejected(t *testing.T) {
+// transaction_items (a BUY/buyback line item) — this used to be rejected
+// with a 409 because a hard delete would have violated the FK, but
+// archiving (an UPDATE, not a DELETE) never touches that row, so it must
+// now succeed cleanly.
+func TestStockItems_DeleteReferencedByBuyTransactionSucceeds(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
@@ -625,20 +788,26 @@ func TestStockItems_DeleteReferencedByBuyTransactionRejected(t *testing.T) {
 	stockItemID := tx.Items[0].StockItemID
 
 	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItemID, nil, adminToken)
-	if status != http.StatusConflict {
-		t.Fatalf("expected 409, got %d (resp=%+v)", status, resp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
 
 	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+stockItemID, nil, adminToken)
 	if status != http.StatusOK {
-		t.Fatalf("expected unit to still exist after blocked delete, got %d (resp=%+v)", status, resp)
+		t.Fatalf("expected unit to still exist after archive, got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockItemDTO
+	decodeData(t, resp, &fetched)
+	if fetched.Status != "ARCHIVED" {
+		t.Fatalf("expected status ARCHIVED, got %q", fetched.Status)
 	}
 }
 
-// TestStockItems_DeleteReferencedByStockOpnameRejected covers a unit that
-// was scanned during a stock opname session (stock_opname_items row created)
-// — same FK-referenced guard as the BUY case above.
-func TestStockItems_DeleteReferencedByStockOpnameRejected(t *testing.T) {
+// TestStockItems_DeleteReferencedByStockOpnameSucceeds covers a unit that
+// was scanned during a stock opname session (stock_opname_items row
+// created) — same FK-referenced case as the BUY test above, now succeeds
+// for the same reason (archive is an UPDATE, never violates the FK).
+func TestStockItems_DeleteReferencedByStockOpnameSucceeds(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
@@ -652,8 +821,8 @@ func TestStockItems_DeleteReferencedByStockOpnameRejected(t *testing.T) {
 	}
 
 	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
-	if status != http.StatusConflict {
-		t.Fatalf("expected 409, got %d (resp=%+v)", status, resp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
 }
 
@@ -790,6 +959,24 @@ func TestStockItems_LookupSoldConflict(t *testing.T) {
 	status, resp := doRequest(t, http.MethodGet, "/api/stock-items/lookup?barcode="+created.Barcode, nil, adminToken)
 	if status != http.StatusConflict {
 		t.Fatalf("expected 409, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestStockItems_LookupArchivedConflict(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/lookup?barcode="+created.Barcode, nil, adminToken)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 looking up an archived unit, got %d (resp=%+v)", status, resp)
 	}
 }
 
