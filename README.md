@@ -1376,6 +1376,12 @@ filter ini akan selalu balik list kosong sampai ada fitur cancel opname).
 
 Response `scan` cuma item yang baru discan (bukan seluruh sesi) — kasir/admin yang lagi scan satu
 per satu butuh feedback instan buat unit itu saja, bukan re-fetch semua item yang sudah discan.
+Tapi ikut disertakan `not_scanned`: jumlah unit `AVAILABLE` yang **masih belum** discan di sesi ini
+saat itu juga (persis yang bakal jadi `MISSING` kalau `complete` dijalankan sekarang) — biar UI
+scan bisa nampilin "masih N belum discan" yang update live tiap abis scan, tanpa fetch ulang.
+Sebelum ini `MISSING` cuma ketahuan **setelah** `complete` (yang langsung nutup sesi), jadi kalau
+ternyata masih ada yang kelewat, satu-satunya jalan adalah bikin sesi opname baru dari awal — field
+ini yang dipakai buat nutup gap itu.
 
 `POST /{id}/complete` menutup sesi: tiap unit `stock_items.status=AVAILABLE` yang **belum pernah
 discan** di sesi ini otomatis dapat baris `system_status=AVAILABLE`, `physical_status=NOT_FOUND`,
@@ -1387,9 +1393,14 @@ tulisan datanya — pola yang sama dengan `receive` PO (BE-903) — supaya scan 
 dengan complete yang konkuren.
 
 `GET /{id}` (dipakai juga sebagai response `POST`/`scan`/`complete`) selalu menyertakan `summary`
-(`{match, missing, unexpected}`, dihitung dari `items[]` yang sudah di-fetch, bukan query terpisah)
-dan `items[]` (barcode/nama produk di-join dari `stock_items`/`products`, sama pola "list/detail
-sertakan nama, bukan FK mentah" seperti `StockItemWithRefs`/`PurchaseOrderWithSupplier`).
+(`{match, missing, unexpected, not_scanned}`) dan `items[]` (barcode/nama produk di-join dari
+`stock_items`/`products`, sama pola "list/detail sertakan nama, bukan FK mentah" seperti
+`StockItemWithRefs`/`PurchaseOrderWithSupplier`). `match`/`missing`/`unexpected` dihitung dari
+`items[]` yang sudah di-fetch (bukan query terpisah); `not_scanned` beda sendiri — itu query
+terpisah yang hitung langsung dari `stock_items` (bukan dari `items[]`, karena unit yang belum
+discan justru **belum punya** baris di `stock_opname_items`), jadi cuma dihitung selagi sesi masih
+`IN_PROGRESS` (`COMPLETED` selalu `0`, karena begitu selesai, unit yang tadinya "belum discan" udah
+jadi baris `MISSING` beneran di `items[]`).
 
 Contoh response `GET /api/stock-opnames?status=IN_PROGRESS` (200) — header-only, `summary` selalu nol:
 ```json
@@ -1403,7 +1414,7 @@ Contoh response `GET /api/stock-opnames?status=IN_PROGRESS` (200) — header-onl
         "opname_date": "2026-07-31",
         "status": "IN_PROGRESS",
         "notes": "",
-        "summary": { "match": 0, "missing": 0, "unexpected": 0 },
+        "summary": { "match": 0, "missing": 0, "unexpected": 0, "not_scanned": 0 },
         "created_at": "2026-07-31T10:00:00Z"
       }
     ],
@@ -1411,6 +1422,9 @@ Contoh response `GET /api/stock-opnames?status=IN_PROGRESS` (200) — header-onl
   }
 }
 ```
+
+`not_scanned` di list header-only di atas selalu `0` juga (bukan angka asli) — sama seperti
+`match`/`missing`/`unexpected`, hitungan sungguhannya cuma ada di `GET /{id}`.
 
 Contoh response `POST /api/stock-opnames/{id}/complete` (200):
 ```json
@@ -1442,8 +1456,26 @@ Contoh response `POST /api/stock-opnames/{id}/complete` (200):
         "result": "MISSING"
       }
     ],
-    "summary": { "match": 1, "missing": 1, "unexpected": 0 },
+    "summary": { "match": 1, "missing": 1, "unexpected": 0, "not_scanned": 0 },
     "created_at": "2026-07-31T09:00:00Z"
+  }
+}
+```
+
+Contoh response `POST /api/stock-opnames/{id}/scan` (200) — sesi ini masih `IN_PROGRESS` dengan 3
+unit `AVAILABLE` total, baru 1 yang sudah discan:
+```json
+{
+  "success": true,
+  "data": {
+    "id": "8b9c0d1e-2f34-5678-90ab-cdef12345678",
+    "stock_item_id": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
+    "barcode": "00000001",
+    "product_name": "Emas Batangan 10gr",
+    "system_status": "AVAILABLE",
+    "physical_status": "FOUND",
+    "result": "MATCH",
+    "not_scanned": 2
   }
 }
 ```
@@ -2225,6 +2257,10 @@ Dua lapis test:
 - `GET /{id}` tidak ditemukan → 404; format id bukan UUID → 400
 - Alur penuh (round trip lintas ketiga ticket): create → scan 2 dari 3 unit `AVAILABLE` →
   complete → `summary={match:2,missing:1,unexpected:0}`
+- `not_scanned` terlihat sebelum `complete`: sesi dengan 3 unit `AVAILABLE` → `GET /{id}` sebelum
+  ada scan sama sekali → `not_scanned=3`; abis scan 1 unit, response `scan` itu sendiri langsung
+  bawa `not_scanned=2` (tanpa fetch ulang), `GET /{id}` sesudahnya setuju; abis `complete` →
+  `not_scanned=0` dan `missing=2` (2 unit yang tadi belum discan)
 
 **`expense_categories_test.go`** — `/api/expense-categories` (BE-1201)
 - Semua endpoint tanpa token → 401; role KASIR → 403

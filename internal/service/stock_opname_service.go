@@ -39,6 +39,19 @@ type StockOpnameSummaryCounts struct {
 	Match      int
 	Missing    int
 	Unexpected int
+	// NotScanned is how many AVAILABLE stock items are still unscanned in
+	// this session — 0 once the session is COMPLETED (those units already
+	// landed as MISSING items by then). Only populated for IN_PROGRESS
+	// sessions; List's header rows leave it 0 like the other counts.
+	NotScanned int
+}
+
+// ScanStockOpnameResult pairs the just-scanned item with the session's
+// current NotScanned count, so the scanning screen can show "still N left"
+// live after every scan instead of only surfacing it once Complete runs.
+type ScanStockOpnameResult struct {
+	Item       StockOpnameItemSummary
+	NotScanned int
 }
 
 // StockOpnameSummary is the public-facing view of an opname session — only
@@ -81,7 +94,7 @@ type StockOpnameService interface {
 	Create(ctx context.Context, input CreateStockOpnameInput) (StockOpnameSummary, error)
 	List(ctx context.Context, input ListStockOpnameInput) (StockOpnameListResult, error)
 	Get(ctx context.Context, publicID string) (StockOpnameSummary, error)
-	Scan(ctx context.Context, opnamePublicID, barcode string) (StockOpnameItemSummary, error)
+	Scan(ctx context.Context, opnamePublicID, barcode string) (ScanStockOpnameResult, error)
 	Complete(ctx context.Context, publicID string) (StockOpnameSummary, error)
 }
 
@@ -174,31 +187,47 @@ func (s *stockOpnameService) Get(ctx context.Context, publicID string) (StockOpn
 		return StockOpnameSummary{}, apperror.Internal("failed to fetch stock opname", err)
 	}
 
-	return toStockOpnameSummary(opname, items), nil
+	summary := toStockOpnameSummary(opname, items)
+	if opname.Status == "IN_PROGRESS" {
+		pending, err := s.stockOpnameRepo.PendingCount(ctx, opname.ID)
+		if err != nil {
+			return StockOpnameSummary{}, apperror.Internal("failed to count pending stock opname items", err)
+		}
+		summary.Summary.NotScanned = pending
+	}
+	return summary, nil
 }
 
-func (s *stockOpnameService) Scan(ctx context.Context, opnamePublicID, barcode string) (StockOpnameItemSummary, error) {
+func (s *stockOpnameService) Scan(ctx context.Context, opnamePublicID, barcode string) (ScanStockOpnameResult, error) {
 	if barcode == "" {
-		return StockOpnameItemSummary{}, apperror.BadRequest("barcode wajib diisi", nil)
+		return ScanStockOpnameResult{}, apperror.BadRequest("barcode wajib diisi", nil)
 	}
 
 	item, err := s.stockOpnameRepo.Scan(ctx, opnamePublicID, barcode)
 	if err != nil {
 		switch {
 		case errors.Is(err, repository.ErrStockOpnameNotFound):
-			return StockOpnameItemSummary{}, apperror.NotFound("sesi opname tidak ditemukan", nil)
+			return ScanStockOpnameResult{}, apperror.NotFound("sesi opname tidak ditemukan", nil)
 		case errors.Is(err, repository.ErrStockOpnameNotInProgress):
-			return StockOpnameItemSummary{}, apperror.Conflict("sesi opname sudah selesai, tidak bisa discan lagi", nil)
+			return ScanStockOpnameResult{}, apperror.Conflict("sesi opname sudah selesai, tidak bisa discan lagi", nil)
 		case errors.Is(err, repository.ErrStockItemNotFound):
-			return StockOpnameItemSummary{}, apperror.NotFound("barcode tidak ditemukan", nil)
+			return ScanStockOpnameResult{}, apperror.NotFound("barcode tidak ditemukan", nil)
 		case errors.Is(err, repository.ErrStockItemAlreadyScanned):
-			return StockOpnameItemSummary{}, apperror.Conflict("unit sudah discan di sesi ini", nil)
+			return ScanStockOpnameResult{}, apperror.Conflict("unit sudah discan di sesi ini", nil)
 		default:
-			return StockOpnameItemSummary{}, apperror.Internal("failed to scan stock item", err)
+			return ScanStockOpnameResult{}, apperror.Internal("failed to scan stock item", err)
 		}
 	}
 
-	return toStockOpnameItemSummary(*item), nil
+	pending, err := s.stockOpnameRepo.PendingCount(ctx, item.OpnameID)
+	if err != nil {
+		return ScanStockOpnameResult{}, apperror.Internal("failed to count pending stock opname items", err)
+	}
+
+	return ScanStockOpnameResult{
+		Item:       toStockOpnameItemSummary(*item),
+		NotScanned: pending,
+	}, nil
 }
 
 func (s *stockOpnameService) Complete(ctx context.Context, publicID string) (StockOpnameSummary, error) {

@@ -103,6 +103,12 @@ type StockOpnameRepository interface {
 	// among this opname's items (single set-based INSERT...SELECT), then
 	// flips status to COMPLETED — all in one DB transaction.
 	Complete(ctx context.Context, publicID string) error
+	// PendingCount returns how many AVAILABLE stock items have not yet been
+	// scanned in this session — exactly what Complete would insert as
+	// MISSING rows if run right now. Lets the UI warn the user before they
+	// complete a session that still has unscanned units, instead of only
+	// finding out after (see stock_opname_service.go's use in Get/Scan).
+	PendingCount(ctx context.Context, opnameID int64) (int, error)
 }
 
 type stockOpnameRepository struct {
@@ -381,4 +387,21 @@ func (r *stockOpnameRepository) Complete(ctx context.Context, publicID string) e
 		return fmt.Errorf("commit tx: %w", err)
 	}
 	return nil
+}
+
+func (r *stockOpnameRepository) PendingCount(ctx context.Context, opnameID int64) (int, error) {
+	const query = `
+		SELECT COUNT(*)
+		FROM stock_items si
+		WHERE si.status = 'AVAILABLE'
+		  AND NOT EXISTS (
+		    SELECT 1 FROM stock_opname_items soi
+		    WHERE soi.opname_id = $1 AND soi.stock_item_id = si.id
+		  )
+	`
+	var count int
+	if err := r.db.QueryRow(ctx, query, opnameID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count pending stock opname items: %w", err)
+	}
+	return count, nil
 }

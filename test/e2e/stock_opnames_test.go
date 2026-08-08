@@ -17,10 +17,18 @@ type stockOpnameItemDTO struct {
 	Result         string `json:"result"`
 }
 
+// scanStockOpnameItemDTO decodes a POST .../scan response — the scanned
+// item's fields plus the running not_scanned count.
+type scanStockOpnameItemDTO struct {
+	stockOpnameItemDTO
+	NotScanned int `json:"not_scanned"`
+}
+
 type stockOpnameSummaryCountsDTO struct {
 	Match      int `json:"match"`
 	Missing    int `json:"missing"`
 	Unexpected int `json:"unexpected"`
+	NotScanned int `json:"not_scanned"`
 }
 
 type stockOpnameDTO struct {
@@ -279,6 +287,69 @@ func TestStockOpnames_ScanAvailableUnitMatches(t *testing.T) {
 	}
 	if item.StockItemID != stockItem.ID || item.Barcode != stockItem.Barcode {
 		t.Fatalf("expected stock item identity to match, got %+v", item)
+	}
+}
+
+// TestStockOpnames_NotScannedCountVisibleBeforeComplete guards the client
+// complaint this feature fixes: previously the only way to see which
+// AVAILABLE units were still unscanned was to Complete the session (which
+// materializes them as MISSING) — by then it's too late to keep scanning
+// without starting a whole new session. not_scanned must be visible on both
+// GET and the live Scan response while the session is still IN_PROGRESS.
+func TestStockOpnames_NotScannedCountVisibleBeforeComplete(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	scanned := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "NOTSCANNED-SN-1"}))
+	_ = createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "NOTSCANNED-SN-2"}))
+	_ = createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "NOTSCANNED-SN-3"}))
+
+	opname := createStockOpname(t, adminToken)
+
+	// Before any scan: all 3 AVAILABLE units are still unscanned.
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-opnames/"+opname.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockOpnameDTO
+	decodeData(t, resp, &fetched)
+	if fetched.Summary.NotScanned != 3 {
+		t.Fatalf("expected not_scanned=3 before any scan, got %+v", fetched.Summary)
+	}
+
+	// The scan response itself reflects the drop immediately, without a
+	// separate GET.
+	status, resp = doRequest(t, http.MethodPost, "/api/stock-opnames/"+opname.ID+"/scan", map[string]any{"barcode": scanned.Barcode}, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("scan: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var scanResult scanStockOpnameItemDTO
+	decodeData(t, resp, &scanResult)
+	if scanResult.NotScanned != 2 {
+		t.Fatalf("expected not_scanned=2 right after scanning 1 of 3, got %+v", scanResult)
+	}
+
+	// GET agrees.
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-opnames/"+opname.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	decodeData(t, resp, &fetched)
+	if fetched.Summary.NotScanned != 2 {
+		t.Fatalf("expected not_scanned=2 on GET after 1 scan, got %+v", fetched.Summary)
+	}
+
+	// Once completed, not_scanned drops to 0 — those units are now MISSING
+	// items instead of a pending count.
+	status, resp = doRequest(t, http.MethodPost, "/api/stock-opnames/"+opname.ID+"/complete", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("complete: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var completed stockOpnameDTO
+	decodeData(t, resp, &completed)
+	if completed.Summary.NotScanned != 0 || completed.Summary.Missing != 2 {
+		t.Fatalf("expected not_scanned=0 missing=2 after complete, got %+v", completed.Summary)
 	}
 }
 

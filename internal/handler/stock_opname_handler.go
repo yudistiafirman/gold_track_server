@@ -46,6 +46,7 @@ type stockOpnameSummaryResponse struct {
 	Match      int `json:"match"`
 	Missing    int `json:"missing"`
 	Unexpected int `json:"unexpected"`
+	NotScanned int `json:"not_scanned"`
 }
 
 // stockOpnameResponse.Items is omitted (empty) right after Create — no
@@ -77,6 +78,7 @@ func toStockOpnameResponse(o service.StockOpnameSummary) stockOpnameResponse {
 			Match:      o.Summary.Match,
 			Missing:    o.Summary.Missing,
 			Unexpected: o.Summary.Unexpected,
+			NotScanned: o.Summary.NotScanned,
 		},
 		CreatedAt: o.CreatedAt,
 	}
@@ -170,9 +172,18 @@ type scanStockOpnameRequest struct {
 	Barcode string `json:"barcode"`
 }
 
-// Scan returns only the single scanned item, not the whole session — a
-// cashier scanning one unit at a time wants immediate feedback on that
-// scan, not a full re-fetch of every item so far.
+// scanStockOpnameResponse embeds the scanned item's fields plus how many
+// AVAILABLE units are still unscanned in this session, so the scanning
+// screen can show a live "N belum discan" without a separate fetch.
+type scanStockOpnameResponse struct {
+	stockOpnameItemResponse
+	NotScanned int `json:"not_scanned"`
+}
+
+// Scan returns only the single scanned item (plus the running not-scanned
+// count), not the whole session — a cashier scanning one unit at a time
+// wants immediate feedback on that scan, not a full re-fetch of every item
+// so far.
 func (h *StockOpnameHandler) Scan(w http.ResponseWriter, r *http.Request) {
 	id, err := publicIDParam(r)
 	if err != nil {
@@ -192,7 +203,10 @@ func (h *StockOpnameHandler) Scan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response.JSON(w, http.StatusOK, toStockOpnameItemResponse(result))
+	response.JSON(w, http.StatusOK, scanStockOpnameResponse{
+		stockOpnameItemResponse: toStockOpnameItemResponse(result.Item),
+		NotScanned:              result.NotScanned,
+	})
 }
 
 func (h *StockOpnameHandler) Complete(w http.ResponseWriter, r *http.Request) {
