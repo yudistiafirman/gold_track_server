@@ -70,6 +70,18 @@ const transactionReceiptColumns = `
 	s.name, s.phone, s.address
 `
 
+// transactionListColumns is qualified with the t./c./s. aliases, same
+// reasoning as transactionReceiptColumns — the general list joins
+// customers/suppliers just to grab their public_id/name (not the full
+// phone/address the receipt needs).
+const transactionListColumns = `
+	t.id, t.public_id::text, t.transaction_code, t.type, t.customer_id, t.supplier_id,
+	t.total_amount::float8, t.total_weight::float8, t.payment_method, t.payment_ref,
+	t.gold_price_id, t.notes, t.invoice_url, t.status, t.created_by, t.created_at, t.completed_at,
+	c.public_id::text, c.name,
+	s.public_id::text, s.name
+`
+
 const transactionItemColumns = `
 	ti.id, ti.public_id::text, ti.transaction_id, ti.stock_item_id, ti.product_name,
 	ti.weight_gram::float8, ti.price_per_gram::float8, ti.price_total::float8, ti.cogs::float8, ti.created_at,
@@ -186,10 +198,11 @@ type TransactionRepository interface {
 	ListByCustomer(ctx context.Context, customerID int64, filter TransactionFilter) ([]model.Transaction, int, error)
 	// List returns transactions of any type, newest first, optionally
 	// filtered by type and created_at date range (same day-range semantics
-	// as the report endpoints) — the per-transaction backing list for the
+	// as the report endpoints), each joined with its counterparty's
+	// public_id/name — the per-transaction backing list for the
 	// sales/buyback screens, so those screens aren't stuck with the
 	// aggregate-only /reports/transactions summary.
-	List(ctx context.Context, filter TransactionFilter) ([]model.Transaction, int, error)
+	List(ctx context.Context, filter TransactionFilter) ([]TransactionWithPartyRef, int, error)
 	// FindByPublicID returns one transaction with its full
 	// transaction_items (each joined with its stock item's public_id/barcode),
 	// regardless of type — used for the detail/struk view.
@@ -524,6 +537,30 @@ func (r *transactionRepository) tryBuy(ctx context.Context, input CreateBuyInput
 	return transaction, results, nil
 }
 
+// TransactionWithPartyRef is a header-only transaction row joined with just
+// its counterparty's identity (public_id + name) — enough to link/display
+// in a general list without a second query per row. Only one of
+// Customer/Supplier is ever non-nil, matching the transaction's type.
+// Unlike TransactionWithParties (the receipt view), this doesn't pull
+// phone/address — the list doesn't print anything.
+type TransactionWithPartyRef struct {
+	model.Transaction
+	CustomerPublicID *string
+	CustomerName     *string
+	SupplierPublicID *string
+	SupplierName     *string
+}
+
+func scanTransactionWithPartyRef(row pgx.Row, t *TransactionWithPartyRef) error {
+	return row.Scan(
+		&t.ID, &t.PublicID, &t.TransactionCode, &t.Type, &t.CustomerID, &t.SupplierID,
+		&t.TotalAmount, &t.TotalWeight, &t.PaymentMethod, &t.PaymentRef,
+		&t.GoldPriceID, &t.Notes, &t.InvoiceURL, &t.Status, &t.CreatedBy, &t.CreatedAt, &t.CompletedAt,
+		&t.CustomerPublicID, &t.CustomerName,
+		&t.SupplierPublicID, &t.SupplierName,
+	)
+}
+
 func scanTransaction(row pgx.Row, t *model.Transaction) error {
 	return row.Scan(
 		&t.ID, &t.PublicID, &t.TransactionCode, &t.Type, &t.CustomerID, &t.SupplierID,
@@ -570,21 +607,21 @@ func (r *transactionRepository) ListByCustomer(ctx context.Context, customerID i
 	return transactions, total, nil
 }
 
-func (r *transactionRepository) List(ctx context.Context, filter TransactionFilter) ([]model.Transaction, int, error) {
+func (r *transactionRepository) List(ctx context.Context, filter TransactionFilter) ([]TransactionWithPartyRef, int, error) {
 	var conditions []string
 	var args []any
 
 	if filter.Type != nil {
 		args = append(args, *filter.Type)
-		conditions = append(conditions, fmt.Sprintf("type = $%d", len(args)))
+		conditions = append(conditions, fmt.Sprintf("t.type = $%d", len(args)))
 	}
 	if filter.DateFrom != nil {
 		args = append(args, *filter.DateFrom)
-		conditions = append(conditions, fmt.Sprintf("created_at::date >= $%d", len(args)))
+		conditions = append(conditions, fmt.Sprintf("t.created_at::date >= $%d", len(args)))
 	}
 	if filter.DateTo != nil {
 		args = append(args, *filter.DateTo)
-		conditions = append(conditions, fmt.Sprintf("created_at::date <= $%d", len(args)))
+		conditions = append(conditions, fmt.Sprintf("t.created_at::date <= $%d", len(args)))
 	}
 	where := ""
 	if len(conditions) > 0 {
@@ -592,13 +629,17 @@ func (r *transactionRepository) List(ctx context.Context, filter TransactionFilt
 	}
 
 	var total int
-	if err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM transactions `+where, args...).Scan(&total); err != nil {
+	if err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM transactions t `+where, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count transactions: %w", err)
 	}
 
 	args = append(args, filter.Limit, (filter.Page-1)*filter.Limit)
-	query := `SELECT ` + transactionColumns + ` FROM transactions ` + where +
-		fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
+	query := `
+		SELECT ` + transactionListColumns + `
+		FROM transactions t
+		LEFT JOIN customers c ON c.id = t.customer_id
+		LEFT JOIN suppliers s ON s.id = t.supplier_id
+		` + where + fmt.Sprintf(` ORDER BY t.created_at DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
 
 	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
@@ -606,10 +647,10 @@ func (r *transactionRepository) List(ctx context.Context, filter TransactionFilt
 	}
 	defer rows.Close()
 
-	var transactions []model.Transaction
+	var transactions []TransactionWithPartyRef
 	for rows.Next() {
-		var t model.Transaction
-		if err := scanTransaction(rows, &t); err != nil {
+		var t TransactionWithPartyRef
+		if err := scanTransactionWithPartyRef(rows, &t); err != nil {
 			return nil, 0, fmt.Errorf("scan transaction row: %w", err)
 		}
 		transactions = append(transactions, t)

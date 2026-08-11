@@ -151,11 +151,37 @@ type TransactionListResult struct {
 	TotalPages int
 }
 
+// PartyRef is a lightweight {public_id, name} reference to a customer or
+// supplier — used only by List (the general transaction list), which isn't
+// pre-scoped to one known party like ListByCustomer/supplier ListHistory
+// are.
+type PartyRef struct {
+	PublicID string
+	Name     string
+}
+
+// TransactionListItem is one row of the general transaction list —
+// TransactionSummary plus the counterparty ref. Only one of Customer/
+// Supplier is ever non-nil, matching the transaction's type.
+type TransactionListItem struct {
+	TransactionSummary
+	Customer *PartyRef
+	Supplier *PartyRef
+}
+
+type GeneralTransactionListResult struct {
+	Items      []TransactionListItem
+	Page       int
+	Limit      int
+	Total      int
+	TotalPages int
+}
+
 type TransactionService interface {
 	CreateSale(ctx context.Context, input CreateSaleInput) (TransactionSummary, error)
 	CreateBuy(ctx context.Context, input CreateBuyInput) (TransactionSummary, error)
 	ListByCustomer(ctx context.Context, input ListCustomerTransactionsInput) (TransactionListResult, error)
-	List(ctx context.Context, input ListTransactionsInput) (TransactionListResult, error)
+	List(ctx context.Context, input ListTransactionsInput) (GeneralTransactionListResult, error)
 	Get(ctx context.Context, publicID string) (TransactionSummary, error)
 	GetReceipt(ctx context.Context, publicID string) (ReceiptSummary, error)
 	Cancel(ctx context.Context, publicID string) (TransactionSummary, error)
@@ -487,23 +513,24 @@ func (s *transactionService) ListByCustomer(ctx context.Context, input ListCusto
 	}, nil
 }
 
-// List returns header-only transaction rows across all customers/suppliers,
-// optionally filtered by type and date range — backs the sales/buyback
-// list screens (as opposed to /reports/transactions, which stays
-// aggregate-only and is composed into the dashboard).
-func (s *transactionService) List(ctx context.Context, input ListTransactionsInput) (TransactionListResult, error) {
+// List returns header-only transaction rows across all customers/suppliers
+// (each with its counterparty ref), optionally filtered by type and date
+// range — backs the sales/buyback list screens (as opposed to
+// /reports/transactions, which stays aggregate-only and is composed into
+// the dashboard).
+func (s *transactionService) List(ctx context.Context, input ListTransactionsInput) (GeneralTransactionListResult, error) {
 	filter := repository.TransactionFilter{}
 
 	if input.Type != "" {
 		if _, ok := allowedTransactionReportTypes[input.Type]; !ok {
-			return TransactionListResult{}, apperror.BadRequest("type harus SELL, BUY, atau SELL_SUPPLIER", nil)
+			return GeneralTransactionListResult{}, apperror.BadRequest("type harus SELL, BUY, atau SELL_SUPPLIER", nil)
 		}
 		filter.Type = &input.Type
 	}
 
 	dateFrom, dateTo, err := parseReportDateRange(input.DateFrom, input.DateTo)
 	if err != nil {
-		return TransactionListResult{}, err
+		return GeneralTransactionListResult{}, err
 	}
 	filter.DateFrom = dateFrom
 	filter.DateTo = dateTo
@@ -522,28 +549,37 @@ func (s *transactionService) List(ctx context.Context, input ListTransactionsInp
 	filter.Page = page
 	filter.Limit = limit
 
-	transactions, total, err := s.transactionRepo.List(ctx, filter)
+	rows, total, err := s.transactionRepo.List(ctx, filter)
 	if err != nil {
-		return TransactionListResult{}, apperror.Internal("failed to list transactions", err)
+		return GeneralTransactionListResult{}, apperror.Internal("failed to list transactions", err)
 	}
 
-	items := make([]TransactionSummary, 0, len(transactions))
-	for _, t := range transactions {
-		items = append(items, TransactionSummary{
-			PublicID:        t.PublicID,
-			TransactionCode: t.TransactionCode,
-			Type:            t.Type,
-			TotalAmount:     t.TotalAmount,
-			TotalWeight:     t.TotalWeight,
-			PaymentMethod:   t.PaymentMethod,
-			PaymentRef:      stringOrEmpty(t.PaymentRef),
-			Status:          t.Status,
-			CreatedAt:       t.CreatedAt,
-			CompletedAt:     t.CompletedAt,
-		})
+	items := make([]TransactionListItem, 0, len(rows))
+	for _, t := range rows {
+		item := TransactionListItem{
+			TransactionSummary: TransactionSummary{
+				PublicID:        t.PublicID,
+				TransactionCode: t.TransactionCode,
+				Type:            t.Type,
+				TotalAmount:     t.TotalAmount,
+				TotalWeight:     t.TotalWeight,
+				PaymentMethod:   t.PaymentMethod,
+				PaymentRef:      stringOrEmpty(t.PaymentRef),
+				Status:          t.Status,
+				CreatedAt:       t.CreatedAt,
+				CompletedAt:     t.CompletedAt,
+			},
+		}
+		if t.CustomerPublicID != nil && t.CustomerName != nil {
+			item.Customer = &PartyRef{PublicID: *t.CustomerPublicID, Name: *t.CustomerName}
+		}
+		if t.SupplierPublicID != nil && t.SupplierName != nil {
+			item.Supplier = &PartyRef{PublicID: *t.SupplierPublicID, Name: *t.SupplierName}
+		}
+		items = append(items, item)
 	}
 
-	return TransactionListResult{
+	return GeneralTransactionListResult{
 		Items:      items,
 		Page:       page,
 		Limit:      limit,

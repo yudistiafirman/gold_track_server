@@ -196,6 +196,33 @@ type transactionListResponse struct {
 	Pagination paginationResponse           `json:"pagination"`
 }
 
+// transactionListItemResponse is one row of the general transaction list —
+// transactionSummaryResponse plus the counterparty ref (only one of
+// Customer/Supplier is ever non-nil, matching the transaction's type).
+// Reuses productRefResponse ({id, name}) — same generic ref shape used
+// elsewhere (e.g. expenseCategoryBreakdownResponse.Category).
+type transactionListItemResponse struct {
+	transactionSummaryResponse
+	Customer *productRefResponse `json:"customer,omitempty"`
+	Supplier *productRefResponse `json:"supplier,omitempty"`
+}
+
+func toTransactionListItemResponse(t service.TransactionListItem) transactionListItemResponse {
+	item := transactionListItemResponse{transactionSummaryResponse: toTransactionSummaryResponse(t.TransactionSummary)}
+	if t.Customer != nil {
+		item.Customer = &productRefResponse{ID: t.Customer.PublicID, Name: t.Customer.Name}
+	}
+	if t.Supplier != nil {
+		item.Supplier = &productRefResponse{ID: t.Supplier.PublicID, Name: t.Supplier.Name}
+	}
+	return item
+}
+
+type generalTransactionListResponse struct {
+	Items      []transactionListItemResponse `json:"items"`
+	Pagination paginationResponse            `json:"pagination"`
+}
+
 // ListByCustomer returns a customer's SELL/BUY transaction history,
 // newest first — BE-602. Lives on TransactionHandler (not CustomerHandler)
 // even though it nests under /customers/{id}/transactions, same reasoning
@@ -258,12 +285,12 @@ func (h *TransactionHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items := make([]transactionSummaryResponse, 0, len(result.Items))
+	items := make([]transactionListItemResponse, 0, len(result.Items))
 	for _, t := range result.Items {
-		items = append(items, toTransactionSummaryResponse(t))
+		items = append(items, toTransactionListItemResponse(t))
 	}
 
-	response.JSON(w, http.StatusOK, transactionListResponse{
+	response.JSON(w, http.StatusOK, generalTransactionListResponse{
 		Items: items,
 		Pagination: paginationResponse{
 			Page:       result.Page,

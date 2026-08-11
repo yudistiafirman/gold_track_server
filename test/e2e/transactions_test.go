@@ -38,6 +38,24 @@ type transactionListDTO struct {
 	Pagination paginationDTO           `json:"pagination"`
 }
 
+type transactionListItemDTO struct {
+	ID              string         `json:"id"`
+	TransactionCode string         `json:"transaction_code"`
+	Type            string         `json:"type"`
+	TotalAmount     float64        `json:"total_amount"`
+	TotalWeight     float64        `json:"total_weight"`
+	PaymentMethod   string         `json:"payment_method"`
+	PaymentRef      string         `json:"payment_ref"`
+	Status          string         `json:"status"`
+	Customer        *productRefDTO `json:"customer"`
+	Supplier        *productRefDTO `json:"supplier"`
+}
+
+type generalTransactionListDTO struct {
+	Items      []transactionListItemDTO `json:"items"`
+	Pagination paginationDTO            `json:"pagination"`
+}
+
 type transactionDTO struct {
 	ID              string               `json:"id"`
 	TransactionCode string               `json:"transaction_code"`
@@ -947,7 +965,7 @@ func TestTransactions_ListCombinesAllTypesAcrossCustomersAndSuppliers(t *testing
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
-	var list transactionListDTO
+	var list generalTransactionListDTO
 	decodeData(t, resp, &list)
 	if list.Pagination.Total != 3 {
 		t.Fatalf("expected total=3, got %d", list.Pagination.Total)
@@ -957,10 +975,25 @@ func TestTransactions_ListCombinesAllTypesAcrossCustomersAndSuppliers(t *testing
 		switch {
 		case tx.ID == buyTx.ID && tx.Type == "BUY":
 			foundBuy = true
+			if tx.Customer == nil || tx.Customer.Name != "Budi Santoso" {
+				t.Fatalf("expected BUY row to have customer ref, got %+v", tx.Customer)
+			}
+			if tx.Supplier != nil {
+				t.Fatalf("expected BUY row to have no supplier ref, got %+v", tx.Supplier)
+			}
 		case tx.ID == sellTx.ID && tx.Type == "SELL":
 			foundSell = true
+			if tx.Customer == nil || tx.Customer.Name != "Budi Santoso" {
+				t.Fatalf("expected SELL row to have customer ref, got %+v", tx.Customer)
+			}
 		case tx.ID == supTx.ID && tx.Type == "SELL_SUPPLIER":
 			foundSup = true
+			if tx.Supplier == nil || tx.Supplier.Name != "Toko Emas Jaya" {
+				t.Fatalf("expected SELL_SUPPLIER row to have supplier ref, got %+v", tx.Supplier)
+			}
+			if tx.Customer != nil {
+				t.Fatalf("expected SELL_SUPPLIER row to have no customer ref, got %+v", tx.Customer)
+			}
 		}
 	}
 	if !foundBuy || !foundSell || !foundSup {
@@ -993,7 +1026,7 @@ func TestTransactions_ListFilterByType(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
-	var list transactionListDTO
+	var list generalTransactionListDTO
 	decodeData(t, resp, &list)
 	if list.Pagination.Total != 1 || len(list.Items) != 1 || list.Items[0].Type != "SELL" {
 		t.Fatalf("expected only 1 SELL transaction, got %+v", list)
@@ -1044,7 +1077,7 @@ func TestTransactions_ListFilterByDateRange(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
-	var list transactionListDTO
+	var list generalTransactionListDTO
 	decodeData(t, resp, &list)
 	if list.Pagination.Total != 1 || len(list.Items) != 1 || list.Items[0].ID != inRangeTx.ID {
 		t.Fatalf("expected only the July transaction, got %+v", list)
@@ -1086,7 +1119,7 @@ func TestTransactions_ListOrderedNewestFirst(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
-	var list transactionListDTO
+	var list generalTransactionListDTO
 	decodeData(t, resp, &list)
 	if len(list.Items) != 3 {
 		t.Fatalf("expected 3 items, got %d", len(list.Items))
@@ -1116,7 +1149,7 @@ func TestTransactions_ListPagination(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("page 1: expected 200, got %d (resp=%+v)", status, resp)
 	}
-	var page1 transactionListDTO
+	var page1 generalTransactionListDTO
 	decodeData(t, resp, &page1)
 	if len(page1.Items) != 2 || page1.Pagination.Total != 3 || page1.Pagination.TotalPages != 2 {
 		t.Fatalf("page 1: expected 2 items total=3 total_pages=2, got %d items %+v", len(page1.Items), page1.Pagination)
@@ -1126,7 +1159,7 @@ func TestTransactions_ListPagination(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("page 2: expected 200, got %d (resp=%+v)", status, resp)
 	}
-	var page2 transactionListDTO
+	var page2 generalTransactionListDTO
 	decodeData(t, resp, &page2)
 	if len(page2.Items) != 1 {
 		t.Fatalf("page 2: expected 1 item, got %d", len(page2.Items))
