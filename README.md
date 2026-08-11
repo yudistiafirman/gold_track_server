@@ -916,14 +916,17 @@ Contoh response error:
 
 ```bash
 POST /api/transactions        # semua role, token valid                                -> 201
+GET  /api/transactions        # list per-transaksi, filter type/from/to, paginated      -> 200 (semua role, token valid)
 GET  /api/transactions/{id}   # detail lengkap (dengan items[]) — struk, SELL maupun BUY -> 200 / 404 (semua role, token valid)
 ```
 
 Tiga `type` didukung: `SELL` (jual ke pelanggan), `SELL_SUPPLIER` (jual ke supplier), `BUY`
-(beli emas dari pelanggan — buyback). Bentuk `items[]` beda tergantung `type`:
+(beli emas dari pelanggan — buyback). Bentuk `items[]` beda tergantung `type`, dan `SELL`/
+`SELL_SUPPLIER` sendiri punya 2 mode item — **scan** (unit yang sudah ada di stok) dan **manual**
+(emas yang tidak pernah lewat stok tercatat, lihat bagian "Mode manual" di bawah):
 
 ```json
-// SELL / SELL_SUPPLIER — menjual unit yang SUDAH ADA
+// SELL / SELL_SUPPLIER — mode scan: menjual unit yang SUDAH ADA
 {
   "type": "SELL",
   "customer_id": "<public_id customer, wajib kalau type=SELL>",
@@ -933,6 +936,21 @@ Tiga `type` didukung: `SELL` (jual ke pelanggan), `SELL_SUPPLIER` (jual ke suppl
   "notes": "",
   "items": [
     { "stock_item_id": "<public_id unit>", "price_total": 1500000, "confirmed": false }
+  ]
+}
+```
+```json
+// SELL / SELL_SUPPLIER — mode manual: emas bukan dari stok tercatat, unit dibuat +
+// langsung terjual dalam transaksi atomik yang sama (lihat bagian "Mode manual" di bawah)
+{
+  "type": "SELL",
+  "customer_id": "<public_id customer>",
+  "payment_method": "CASH",
+  "items": [
+    {
+      "product_id": "<public_id produk>", "serial_number": "MANUAL-0001", "condition": "GOOD",
+      "cost_total": 900000, "price_total": 1500000, "confirmed": false
+    }
   ]
 }
 ```
@@ -964,13 +982,46 @@ satu item gagal (misal `serial_number` bentrok), **seluruh** transaksi dibatalka
 yang setengah-tersimpan.
 
 **Aturan per `type`**:
-- `SELL` → `customer_id` wajib, `supplier_id` harus kosong. Item pakai `stock_item_id` (unit yang
-  sudah ada) + `price_total` (+ `confirmed` kalau unitnya `BAD`, lihat di bawah).
+- `SELL` → `customer_id` wajib, `supplier_id` harus kosong. Item mode scan pakai `stock_item_id`
+  (unit yang sudah ada) + `price_total` (+ `confirmed` kalau unitnya `BAD`, lihat di bawah). Item
+  mode manual pakai `product_id` + `serial_number` + `condition` + `cost_total` + `price_total`
+  (lihat "Mode manual — emas bukan dari stok tercatat" di bawah).
 - `SELL_SUPPLIER` → `supplier_id` wajib, `customer_id` harus kosong. Sama seperti `SELL` soal
-  bentuk item, tapi tidak pernah butuh `confirmed`.
+  bentuk item (scan maupun manual), tapi tidak pernah butuh `confirmed`.
 - `BUY` → `customer_id` wajib (tidak ada `supplier_id` buat `BUY`). Item pakai `product_id`
   (produk yang mau ditambah stoknya) + `serial_number` + `condition` + `price_total` — **bukan**
-  `stock_item_id`, karena unitnya belum ada, baru dibuat oleh request ini.
+  `stock_item_id`, karena unitnya belum ada, baru dibuat oleh request ini. `BUY` sendiri sudah
+  "manual" dari sononya (tidak pernah ada mode scan) — makanya mode manual di bawah cuma relevan
+  buat `SELL`/`SELL_SUPPLIER`.
+
+**Mode manual — emas bukan dari stok tercatat (`SELL`/`SELL_SUPPLIER` saja)**: satu item
+dianggap mode manual kalau `stock_item_id` kosong dan `product_id` diisi sebagai gantinya (isi
+keduanya sekaligus, atau kosongkan keduanya → 400). Dipakai buat jual emas yang tidak pernah
+melalui alur stok tercatat (tidak ada unit `AVAILABLE` yang bisa discan) tapi labanya tetap harus
+tercatat di laporan — misalnya reseller/dagangan titipan yang langsung lewat tanpa numpuk di rak.
+Field tambahan yang cuma berlaku di mode ini:
+- `product_id` — produk katalog yang jadi acuan nama/berat (`weight_gram`) unit ini. Produk harus
+  ada (404) dan aktif (400 kalau sudah diarsipkan) — sama guard-nya seperti `BUY`.
+- `serial_number` **wajib**, unik (kena constraint partial-unique yang sama dengan `BUY` —
+  `uq_stock_items_serial_number_available`, cuma dicek antar unit yang sedang `AVAILABLE`) → 422
+  kalau kosong, 409 kalau bentrok (baik antar item manual dalam batch yang sama maupun terhadap
+  unit `AVAILABLE` lain yang sudah ada).
+- `condition` (`GOOD`/`BAD`) wajib → 422 kalau kosong/invalid. Kalau `BAD` dan `type=SELL`, tetap
+  butuh `confirmed: true` sama seperti mode scan (`SELL_SUPPLIER` tidak pernah butuh).
+- `cost_total` wajib > 0 → 422 kalau tidak. Ini "harga modal"/cogs unit — dipakai identik dengan
+  `purchase_price` pada unit hasil `BUY`, jadi laba (`price_total - cost_total`) muncul otomatis di
+  `/api/reports/finance` tanpa logic laporan terpisah.
+- `production_year` opsional, aturan validasi sama seperti `BUY` (422 kalau di luar rentang).
+
+Secara internal, item manual membuat baris `stock_items` baru (barcode auto-generate, sama urutan
+sequence dengan `BUY`) dengan `status=AVAILABLE` lalu **dalam transaksi DB yang sama** langsung
+diflip ke `SOLD` — jadi unit itu **tidak pernah** kelihatan sebagai stok `AVAILABLE` di response API
+manapun (tidak muncul di list stock items, lookup checkout, dashboard, dll — beda tabel-transaksi
+yang sama membuat perubahan itu atomik), tapi tetap dapat `barcode`/`stock_item_id` yang valid buat
+audit trail dan label kalau perlu dicetak ulang. Meng-cancel transaksi ini (`POST
+/api/transactions/{id}/cancel`) mengembalikan unitnya ke `AVAILABLE` — perilaku sama seperti cancel
+`SELL` biasa (lihat section cancel di bawah), yang masuk akal karena barangnya memang masih ada di
+toko setelah penjualannya dibatalkan.
 
 **Konfirmasi kondisi BAD (BE-703, cuma berlaku utk `SELL`)**: kalau `type=SELL` dan unit yang
 direferensikan `condition=BAD`, item itu wajib `"confirmed": true` — kalau tidak, seluruh
@@ -1094,12 +1145,17 @@ Contoh response error:
 // 400 — type bukan SELL/SELL_SUPPLIER/tidak didukung, atau customer_id/supplier_id tidak sesuai type
 {"success":false,"error":{"code":"BAD_REQUEST","message":"type SELL wajib mengisi customer_id dan tidak boleh mengisi supplier_id"}}
 
-// 400 — payment_method invalid, items kosong, price_total <= 0, atau BUY produk diarsipkan
+// 400 — payment_method invalid, items kosong, price_total <= 0, produk diarsipkan (BUY atau mode
+// manual), atau item SELL/SELL_SUPPLIER isi stock_item_id dan product_id sekaligus (atau tidak
+// keduanya)
 {"success":false,"error":{"code":"BAD_REQUEST","message":"payment_method harus salah satu dari CASH, TRANSFER, QRIS, DEBIT, KREDIT, GOPAY, OVO, DANA, SHOPEEPAY"}}
+{"success":false,"error":{"code":"BAD_REQUEST","message":"item tidak boleh mengisi stock_item_id dan product_id sekaligus"}}
 
-// 422 — BUY, serial_number/condition kosong atau invalid per item
+// 422 — BUY, atau mode manual SELL/SELL_SUPPLIER: serial_number/condition/cost_total kosong
+// atau invalid per item
 {"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"serial_number wajib diisi di setiap item"}}
 {"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"condition wajib diisi dan harus GOOD atau BAD di setiap item"}}
+{"success":false,"error":{"code":"UNPROCESSABLE_ENTITY","message":"cost_total item manual harus lebih besar dari 0"}}
 
 // 404 — customer_id/supplier_id/stock_item_id/product_id tidak ditemukan
 {"success":false,"error":{"code":"NOT_FOUND","message":"pelanggan tidak ditemukan"}}
@@ -1107,12 +1163,58 @@ Contoh response error:
 // 409 — unit sudah SOLD (termasuk hasil race FOR UPDATE)
 {"success":false,"error":{"code":"CONFLICT","message":"unit sudah terjual (SOLD), tidak bisa dijual"}}
 
-// 409 — unit BAD dijual ke pelanggan tanpa confirmed=true
+// 409 — unit BAD dijual ke pelanggan tanpa confirmed=true (mode scan maupun manual)
 {"success":false,"error":{"code":"CONFLICT","message":"unit kondisi BAD perlu konfirmasi (confirmed=true) untuk dijual ke pelanggan"}}
 
-// 409 — BUY, serial_number sudah dipakai (unit lain, atau item lain di batch yang sama)
+// 409 — serial_number sudah dipakai (BUY, atau mode manual SELL/SELL_SUPPLIER — unit lain, atau
+// item lain di batch yang sama)
 {"success":false,"error":{"code":"CONFLICT","message":"serial_number sudah dipakai"}}
 ```
+
+#### GET /api/transactions — list per-transaksi
+
+```
+GET /api/transactions?type=SELL&from=2026-08-01&to=2026-08-12&page=1&limit=20   -> 200
+```
+
+Semua role, token valid. Balikin transaksi satu-per-satu (header-only, tanpa `items[]` —
+`transactionSummaryResponse`, sama bentuknya dengan `GET /api/customers/{id}/transactions`), beda
+dari `GET /api/reports/transactions` yang cuma aggregate per tipe dan `SUPER_ADMIN`-only. Query
+param semuanya opsional: `type` (`SELL`/`BUY`/`SELL_SUPPLIER`, tanpa ini semua tipe ikut),
+`from`/`to` (`YYYY-MM-DD`, inclusive, filter `created_at`, semantik sama dengan
+`/reports/transactions`), `page`/`limit` (default 1/20, `limit` maks 100).
+
+Tiap baris juga menyertakan `customer`/`supplier` — `{id, name} | null`, cuma salah satu yang
+pernah terisi sesuai `type` (`SELL`/`BUY` → `customer`, `SELL_SUPPLIER` → `supplier`) — field ini
+**tidak ada** di `GET /api/customers/{id}/transactions` (di situ redundan, sudah tau customer-nya
+siapa dari path).
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "2b3c4d5e-6f70-8901-bcde-f01234567890",
+        "transaction_code": "TRX-20260731-0001",
+        "type": "SELL",
+        "total_amount": 1500000,
+        "total_weight": 10,
+        "payment_method": "TRANSFER",
+        "payment_ref": "BCA - 88812345",
+        "status": "COMPLETED",
+        "customer": { "id": "c1a2b3c4-...", "name": "Budi Santoso" },
+        "supplier": null,
+        "created_at": "2026-07-31T09:00:00Z",
+        "completed_at": "2026-07-31T09:00:00Z"
+      }
+    ],
+    "pagination": { "page": 1, "limit": 20, "total": 1, "total_pages": 1 }
+  }
+}
+```
+
+Error: `400` (`type`/`from`/`to` invalid — pesan sama dengan `/reports/transactions`), `401`.
 
 #### GET /api/transactions/{id} — detail transaksi (BE-602)
 
@@ -2188,6 +2290,23 @@ Dua lapis test:
 - `BUY` `serial_number` yang sudah dipakai unit lain (dibuat sebelumnya) → 409
 - `BUY` `serial_number` kosong / `condition` invalid → 422; `price_total <= 0` → 400
 - `BUY` tanpa `customer_id` → 400; `product_id` tidak ditemukan → 404; produk diarsipkan → 400
+- **Mode manual** (`SELL`/`SELL_SUPPLIER` item tanpa `stock_item_id`, pakai `product_id` +
+  `cost_total` sebagai gantinya — emas bukan dari stok tercatat): item manual → 201, unit baru
+  langsung `status=SOLD` (tidak pernah kelihatan `AVAILABLE`), `purchase_price` di DB = `cost_total`
+  yang diinput; sama untuk `SELL_SUPPLIER`; isi `stock_item_id` **dan** `product_id` sekaligus (atau
+  tidak keduanya) → 400; `serial_number` kosong / `condition` invalid / `cost_total` <= 0 → 422;
+  `condition=BAD` tanpa `confirmed` → 409 (`SELL`), 201 tanpa `confirmed` (`SELL_SUPPLIER`);
+  `serial_number` bentrok antar item manual dalam batch yang sama, atau terhadap unit `AVAILABLE`
+  lain yang sudah ada → 409; `product_id` tidak ditemukan → 404; produk diarsipkan → 400; item scan
+  dan manual dicampur dalam satu transaksi → 201, total tergabung benar; laba item manual
+  (`price_total - cost_total`) muncul di `GET /api/reports/finance` persis seperti item scan; cancel
+  transaksi berisi item manual → unit balik ke `AVAILABLE` sama seperti cancel `SELL` biasa
+- `GET /api/transactions` (list per-transaksi, semua role): tanpa token → 401; menggabungkan
+  `SELL`/`BUY`/`SELL_SUPPLIER` lintas customer/supplier (beda dari riwayat customer/supplier);
+  tiap baris berisi `customer`/`supplier` ref sesuai `type` (`BUY`/`SELL` → `customer` terisi
+  `supplier` `null`, dan sebaliknya untuk `SELL_SUPPLIER`); `?type=` menyempitkan hasil, `type`
+  invalid → 400; `?from=&to=` menyempitkan sesuai rentang tanggal, format salah → 400; urut
+  terbaru duluan; `?limit=&page=` paginasi dengan benar
 - `GET /api/customers/{id}/transactions` (BE-602): tanpa token → 401; `{id}` pelanggan tidak
   ditemukan → 404; menggabungkan `SELL` **dan** `BUY` milik pelanggan yang sama; transaksi milik
   pelanggan lain tidak ikut ke-list; urut **terbaru duluan** (dicek pakai urutan

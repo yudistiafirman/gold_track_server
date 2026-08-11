@@ -77,14 +77,20 @@ func toTransactionResponse(t service.TransactionSummary) transactionResponse {
 	}
 }
 
+// createTransactionItemRequest covers 3 modes: BUY (always ProductID/
+// SerialNumber/Condition — no scanning), SELL/SELL_SUPPLIER scan mode
+// (StockItemID), and SELL/SELL_SUPPLIER manual mode (ProductID/
+// SerialNumber/Condition/CostTotal — gold not from tracked stock, sold in
+// the same atomic transaction the unit is created in).
 type createTransactionItemRequest struct {
-	StockItemID    string  `json:"stock_item_id"`   // SELL / SELL_SUPPLIER
-	ProductID      string  `json:"product_id"`      // BUY
-	SerialNumber   string  `json:"serial_number"`   // BUY
-	Condition      string  `json:"condition"`       // BUY
+	StockItemID    string  `json:"stock_item_id"`   // SELL / SELL_SUPPLIER scan mode
+	ProductID      string  `json:"product_id"`      // BUY, or SELL/SELL_SUPPLIER manual mode
+	SerialNumber   string  `json:"serial_number"`   // BUY, or SELL/SELL_SUPPLIER manual mode
+	Condition      string  `json:"condition"`       // BUY, or SELL/SELL_SUPPLIER manual mode
+	CostTotal      float64 `json:"cost_total"`      // SELL/SELL_SUPPLIER manual mode only
 	PriceTotal     float64 `json:"price_total"`     // all types
 	Confirmed      bool    `json:"confirmed"`       // SELL only
-	ProductionYear *int    `json:"production_year"` // BUY, optional
+	ProductionYear *int    `json:"production_year"` // BUY, or SELL/SELL_SUPPLIER manual mode, optional
 }
 
 type createTransactionRequest struct {
@@ -137,6 +143,11 @@ func (h *TransactionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		for _, it := range req.Items {
 			items = append(items, service.CreateSaleItemInput{
 				StockItemPublicID: it.StockItemID,
+				ProductPublicID:   it.ProductID,
+				SerialNumber:      it.SerialNumber,
+				Condition:         it.Condition,
+				CostTotal:         it.CostTotal,
+				ProductionYear:    it.ProductionYear,
 				PriceTotal:        it.PriceTotal,
 				Confirmed:         it.Confirmed,
 			})

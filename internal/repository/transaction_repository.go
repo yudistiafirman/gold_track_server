@@ -128,13 +128,29 @@ type TransactionFilter struct {
 	DateTo   *time.Time
 }
 
-// SaleItemInput is one scanned unit going into a sale — StockItemID is the
-// internal id, already resolved from the client-supplied public_id by the
-// service layer.
+// SaleItemInput is one unit going into a sale, in one of two modes:
+//
+//   - Scan mode (StockItemID > 0): an existing AVAILABLE unit, already
+//     resolved from the client-supplied public_id by the service layer.
+//   - Manual mode (StockItemID == 0): gold that never passed through
+//     tracked inventory (off-catalog resale, walk-through deals) — the
+//     ProductID/SerialNumber/Condition/CostTotal/ProductionYear fields
+//     below are used to create the stock_items row and sell it in the
+//     same atomic transaction, so it's never externally observable as
+//     "currently available" stock, yet still books cogs/margin exactly
+//     like a scanned sale (same downstream report/finance queries, no
+//     special-casing needed there).
 type SaleItemInput struct {
 	StockItemID int64
-	PriceTotal  float64
-	Confirmed   bool
+
+	ProductID      int64
+	SerialNumber   string
+	Condition      string
+	CostTotal      float64
+	ProductionYear *int
+
+	PriceTotal float64
+	Confirmed  bool
 }
 
 type CreateSaleInput struct {
@@ -179,13 +195,26 @@ type BuyItemResult struct {
 	SerialNumber      string
 }
 
+// SaleItemResult mirrors BuyItemResult — needed because a manual-mode sale
+// item's stock item doesn't exist before CreateSale runs, so its
+// public_id/barcode/serial_number can't be resolved by the caller
+// beforehand the way a scanned item's can.
+type SaleItemResult struct {
+	TransactionItem   model.TransactionItem
+	StockItemPublicID string
+	Barcode           string
+	SerialNumber      string
+}
+
 type TransactionRepository interface {
-	// CreateSale locks every referenced stock_items row (SELECT ... FOR
-	// UPDATE), verifies each is still AVAILABLE (and, for a SELL with a
-	// BAD-condition unit, Confirmed), generates a unique transaction_code
-	// with retry, inserts the transaction + transaction_items, and flips
-	// every unit to SOLD — all in one DB transaction.
-	CreateSale(ctx context.Context, input CreateSaleInput) (*model.Transaction, []model.TransactionItem, error)
+	// CreateSale locks every scan-mode item's stock_items row (SELECT ...
+	// FOR UPDATE) and creates a fresh one for every manual-mode item (see
+	// SaleItemInput), verifies each is/becomes AVAILABLE (and, for a SELL
+	// with a BAD-condition unit, Confirmed), generates a unique
+	// transaction_code with retry, inserts the transaction +
+	// transaction_items, and flips every unit to SOLD — all in one DB
+	// transaction.
+	CreateSale(ctx context.Context, input CreateSaleInput) (*model.Transaction, []SaleItemResult, error)
 	// CreateBuy creates one brand-new stock_items row per item (status
 	// AVAILABLE, purchase_price = the item's negotiated PriceTotal,
 	// purchase_date = today), a transaction_code with retry, the
@@ -233,13 +262,13 @@ func NewTransactionRepository(db *pgxpool.Pool) TransactionRepository {
 	return &transactionRepository{db: db}
 }
 
-func (r *transactionRepository) CreateSale(ctx context.Context, input CreateSaleInput) (*model.Transaction, []model.TransactionItem, error) {
+func (r *transactionRepository) CreateSale(ctx context.Context, input CreateSaleInput) (*model.Transaction, []SaleItemResult, error) {
 	for i := 0; i < createSaleMaxAttempts; i++ {
-		transaction, items, err := r.trySale(ctx, input)
+		transaction, results, err := r.trySale(ctx, input)
 		if err == nil {
-			return transaction, items, nil
+			return transaction, results, nil
 		}
-		if errors.Is(err, ErrTransactionCodeConflict) {
+		if errors.Is(err, ErrTransactionCodeConflict) || errors.Is(err, ErrBarcodeConflict) {
 			continue
 		}
 		return nil, nil, err
@@ -247,15 +276,22 @@ func (r *transactionRepository) CreateSale(ctx context.Context, input CreateSale
 	return nil, nil, ErrTransactionCodeGenerationFailed
 }
 
+// lockedStockItem is one item ready to be sold, regardless of whether it
+// came from an existing locked row (scan mode) or was just created
+// (manual mode) — publicID/barcode/serialNumber are carried through so the
+// final result can be built without a second query per item.
 type lockedStockItem struct {
 	stockItemID   int64
+	publicID      string
+	barcode       string
+	serialNumber  string
 	productName   string
 	weightGram    float64
 	purchasePrice float64
 	priceTotal    float64
 }
 
-func (r *transactionRepository) trySale(ctx context.Context, input CreateSaleInput) (*model.Transaction, []model.TransactionItem, error) {
+func (r *transactionRepository) trySale(ctx context.Context, input CreateSaleInput) (*model.Transaction, []SaleItemResult, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("begin tx: %w", err)
@@ -266,37 +302,97 @@ func (r *transactionRepository) trySale(ctx context.Context, input CreateSaleInp
 	locked := make([]lockedStockItem, 0, len(input.Items))
 
 	for _, item := range input.Items {
-		var status, condition, productName string
-		var purchasePrice, weightGram float64
+		if item.StockItemID != 0 {
+			var status, condition, productName, publicID, barcode, serialNumber string
+			var purchasePrice, weightGram float64
 
-		err := tx.QueryRow(ctx, `
-			SELECT si.status, si.condition, si.purchase_price::float8, p.name, p.weight_gram::float8
-			FROM stock_items si
-			JOIN products p ON p.id = si.product_id
-			WHERE si.id = $1
-			FOR UPDATE
-		`, item.StockItemID).Scan(&status, &condition, &purchasePrice, &productName, &weightGram)
-		if err != nil {
-			return nil, nil, fmt.Errorf("lock stock item: %w", err)
-		}
-
-		if status != "AVAILABLE" {
-			if status == "ARCHIVED" {
-				return nil, nil, ErrStockItemArchivedForSale
+			err := tx.QueryRow(ctx, `
+				SELECT si.status, si.condition, si.purchase_price::float8, si.public_id::text, si.barcode, si.serial_number, p.name, p.weight_gram::float8
+				FROM stock_items si
+				JOIN products p ON p.id = si.product_id
+				WHERE si.id = $1
+				FOR UPDATE
+			`, item.StockItemID).Scan(&status, &condition, &purchasePrice, &publicID, &barcode, &serialNumber, &productName, &weightGram)
+			if err != nil {
+				return nil, nil, fmt.Errorf("lock stock item: %w", err)
 			}
-			return nil, nil, ErrStockItemUnavailableForSale
+
+			if status != "AVAILABLE" {
+				if status == "ARCHIVED" {
+					return nil, nil, ErrStockItemArchivedForSale
+				}
+				return nil, nil, ErrStockItemUnavailableForSale
+			}
+			if input.Type == "SELL" && condition == "BAD" && !item.Confirmed {
+				return nil, nil, ErrConfirmationRequired
+			}
+
+			totalAmount += item.PriceTotal
+			totalWeight += weightGram
+			locked = append(locked, lockedStockItem{
+				stockItemID:   item.StockItemID,
+				publicID:      publicID,
+				barcode:       barcode,
+				serialNumber:  serialNumber,
+				productName:   productName,
+				weightGram:    weightGram,
+				purchasePrice: purchasePrice,
+				priceTotal:    item.PriceTotal,
+			})
+			continue
 		}
-		if input.Type == "SELL" && condition == "BAD" && !item.Confirmed {
+
+		// Manual mode: gold that never passed through tracked inventory.
+		// Create the unit AVAILABLE (same shape as CreateBuy) and let it
+		// fall through to the same "mark stock item sold" step below as
+		// every scanned item — it's never externally observable as
+		// available since both happen inside this one DB transaction.
+		if input.Type == "SELL" && item.Condition == "BAD" && !item.Confirmed {
 			return nil, nil, ErrConfirmationRequired
+		}
+
+		var productName string
+		var weightGram float64
+		if err := tx.QueryRow(ctx, `SELECT name, weight_gram::float8 FROM products WHERE id = $1`, item.ProductID).
+			Scan(&productName, &weightGram); err != nil {
+			return nil, nil, fmt.Errorf("fetch product for manual sale item: %w", err)
+		}
+
+		barcode, err := nextStockItemBarcode(ctx, tx)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		const insertManualStockItemQuery = `
+			INSERT INTO stock_items (product_id, barcode, serial_number, condition, purchase_price, purchase_date, production_year, status, created_by)
+			VALUES ($1, $2, $3, $4, $5, now(), $6, 'AVAILABLE', $7)
+			RETURNING id, public_id::text
+		`
+		var stockItemID int64
+		var stockItemPublicID string
+		err = tx.QueryRow(ctx, insertManualStockItemQuery,
+			item.ProductID, barcode, item.SerialNumber, item.Condition, item.CostTotal, item.ProductionYear, input.CreatedBy,
+		).Scan(&stockItemID, &stockItemPublicID)
+		if err != nil {
+			if isUniqueViolationOnConstraint(err, uqStockItemsSerialNumber) {
+				return nil, nil, ErrSerialNumberTaken
+			}
+			if isUniqueViolation(err) {
+				return nil, nil, ErrBarcodeConflict
+			}
+			return nil, nil, fmt.Errorf("insert stock item for manual sale: %w", err)
 		}
 
 		totalAmount += item.PriceTotal
 		totalWeight += weightGram
 		locked = append(locked, lockedStockItem{
-			stockItemID:   item.StockItemID,
+			stockItemID:   stockItemID,
+			publicID:      stockItemPublicID,
+			barcode:       barcode,
+			serialNumber:  item.SerialNumber,
 			productName:   productName,
 			weightGram:    weightGram,
-			purchasePrice: purchasePrice,
+			purchasePrice: item.CostTotal,
 			priceTotal:    item.PriceTotal,
 		})
 	}
@@ -339,7 +435,7 @@ func (r *transactionRepository) trySale(ctx context.Context, input CreateSaleInp
 		return nil, nil, fmt.Errorf("insert transaction: %w", err)
 	}
 
-	items := make([]model.TransactionItem, 0, len(locked))
+	results := make([]SaleItemResult, 0, len(locked))
 	const insertItemQuery = `
 		INSERT INTO transaction_items (transaction_id, stock_item_id, product_name, weight_gram, price_per_gram, price_total, cogs)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -371,14 +467,19 @@ func (r *transactionRepository) trySale(ctx context.Context, input CreateSaleInp
 			return nil, nil, fmt.Errorf("mark stock item sold: %w", err)
 		}
 
-		items = append(items, txItem)
+		results = append(results, SaleItemResult{
+			TransactionItem:   txItem,
+			StockItemPublicID: li.publicID,
+			Barcode:           li.barcode,
+			SerialNumber:      li.serialNumber,
+		})
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, fmt.Errorf("commit tx: %w", err)
 	}
 
-	return transaction, items, nil
+	return transaction, results, nil
 }
 
 func (r *transactionRepository) CreateBuy(ctx context.Context, input CreateBuyInput) (*model.Transaction, []BuyItemResult, error) {

@@ -65,10 +65,26 @@ type TransactionSummary struct {
 	CompletedAt     *time.Time
 }
 
+// CreateSaleItemInput is one sale item, in one of two mutually exclusive
+// modes:
+//
+//   - Scan mode: StockItemPublicID set — an existing AVAILABLE unit.
+//   - Manual mode: StockItemPublicID empty, ProductPublicID set instead —
+//     gold that never passed through tracked inventory (off-catalog
+//     resale, walk-through deals). CreateSale creates the stock_items row
+//     and sells it in the same atomic transaction, so profit/cogs still
+//     books exactly like a scanned sale.
 type CreateSaleItemInput struct {
 	StockItemPublicID string
-	PriceTotal        float64
-	Confirmed         bool
+
+	ProductPublicID string
+	SerialNumber    string
+	Condition       string
+	CostTotal       float64
+	ProductionYear  *int // optional
+
+	PriceTotal float64
+	Confirmed  bool
 }
 
 type CreateSaleInput struct {
@@ -227,9 +243,38 @@ func (s *transactionService) CreateSale(ctx context.Context, input CreateSaleInp
 	if len(input.Items) == 0 {
 		return TransactionSummary{}, apperror.BadRequest("items wajib diisi minimal 1 unit", nil)
 	}
+	seenManualSerialNumbers := make(map[string]struct{}, len(input.Items))
 	for _, item := range input.Items {
-		if item.StockItemPublicID == "" {
-			return TransactionSummary{}, apperror.BadRequest("stock_item_id wajib diisi di setiap item", nil)
+		isManual := item.StockItemPublicID == ""
+		if !isManual {
+			if item.ProductPublicID != "" {
+				return TransactionSummary{}, apperror.BadRequest("item tidak boleh mengisi stock_item_id dan product_id sekaligus", nil)
+			}
+		} else {
+			// Manual mode — this item mints a brand-new stock_items row
+			// (gold not from tracked stock), so its unit-creating fields
+			// use the same 422 tier as BUY items (see CLAUDE.md
+			// "Validation status-code tiers").
+			if item.ProductPublicID == "" {
+				return TransactionSummary{}, apperror.BadRequest("item wajib mengisi stock_item_id atau product_id", nil)
+			}
+			serialNumber := strings.TrimSpace(item.SerialNumber)
+			if serialNumber == "" {
+				return TransactionSummary{}, apperror.UnprocessableEntity("serial_number wajib diisi untuk item manual", nil)
+			}
+			if _, ok := allowedConditions[item.Condition]; !ok {
+				return TransactionSummary{}, apperror.UnprocessableEntity("condition wajib diisi dan harus GOOD atau BAD untuk item manual", nil)
+			}
+			if item.CostTotal <= 0 {
+				return TransactionSummary{}, apperror.UnprocessableEntity("cost_total item manual harus lebih besar dari 0", nil)
+			}
+			if _, dup := seenManualSerialNumbers[serialNumber]; dup {
+				return TransactionSummary{}, apperror.Conflict("serial_number tidak boleh sama antar item dalam satu transaksi", nil)
+			}
+			seenManualSerialNumbers[serialNumber] = struct{}{}
+			if err := validateProductionYear(item.ProductionYear); err != nil {
+				return TransactionSummary{}, err
+			}
 		}
 		if item.PriceTotal <= 0 {
 			return TransactionSummary{}, apperror.BadRequest("price_total setiap item harus lebih besar dari 0", nil)
@@ -270,28 +315,45 @@ func (s *transactionService) CreateSale(ctx context.Context, input CreateSaleInp
 	}
 
 	saleItems := make([]repository.SaleItemInput, 0, len(input.Items))
-	// stockItemRefs mirrors saleItems index-for-index — trySale processes
-	// input.Items in order and returns transaction_items in that same
-	// order, so this lets us re-attach each result to the stock item's
-	// public_id/barcode without changing CreateSale's return shape.
-	stockItemRefs := make([]struct{ PublicID, Barcode, SerialNumber string }, 0, len(input.Items))
 	for _, item := range input.Items {
-		stockItem, err := s.stockItemRepo.FindByPublicID(ctx, item.StockItemPublicID)
-		if err != nil {
-			if errors.Is(err, repository.ErrStockItemNotFound) {
-				return TransactionSummary{}, apperror.NotFound("unit stok tidak ditemukan", nil)
+		if item.StockItemPublicID != "" {
+			stockItem, err := s.stockItemRepo.FindByPublicID(ctx, item.StockItemPublicID)
+			if err != nil {
+				if errors.Is(err, repository.ErrStockItemNotFound) {
+					return TransactionSummary{}, apperror.NotFound("unit stok tidak ditemukan", nil)
+				}
+				return TransactionSummary{}, apperror.Internal("failed to fetch stock item", err)
 			}
-			return TransactionSummary{}, apperror.Internal("failed to fetch stock item", err)
+			saleItems = append(saleItems, repository.SaleItemInput{
+				StockItemID: stockItem.ID,
+				PriceTotal:  item.PriceTotal,
+				Confirmed:   item.Confirmed,
+			})
+			continue
+		}
+
+		product, err := s.productRepo.FindByPublicID(ctx, item.ProductPublicID)
+		if err != nil {
+			if errors.Is(err, repository.ErrProductNotFound) {
+				return TransactionSummary{}, apperror.NotFound("produk tidak ditemukan", nil)
+			}
+			return TransactionSummary{}, apperror.Internal("failed to fetch product", err)
+		}
+		if !product.IsActive {
+			return TransactionSummary{}, apperror.BadRequest("produk sudah diarsipkan, tidak bisa dijual manual", nil)
 		}
 		saleItems = append(saleItems, repository.SaleItemInput{
-			StockItemID: stockItem.ID,
-			PriceTotal:  item.PriceTotal,
-			Confirmed:   item.Confirmed,
+			ProductID:      product.ID,
+			SerialNumber:   strings.TrimSpace(item.SerialNumber),
+			Condition:      item.Condition,
+			CostTotal:      item.CostTotal,
+			ProductionYear: item.ProductionYear,
+			PriceTotal:     item.PriceTotal,
+			Confirmed:      item.Confirmed,
 		})
-		stockItemRefs = append(stockItemRefs, struct{ PublicID, Barcode, SerialNumber string }{stockItem.PublicID, stockItem.Barcode, stockItem.SerialNumber})
 	}
 
-	transaction, items, err := s.transactionRepo.CreateSale(ctx, repository.CreateSaleInput{
+	transaction, results, err := s.transactionRepo.CreateSale(ctx, repository.CreateSaleInput{
 		Type:          input.Type,
 		CustomerID:    customerID,
 		SupplierID:    supplierID,
@@ -309,6 +371,8 @@ func (s *transactionService) CreateSale(ctx context.Context, input CreateSaleInp
 			return TransactionSummary{}, apperror.Conflict("unit sudah diarsipkan, tidak bisa dijual", nil)
 		case errors.Is(err, repository.ErrConfirmationRequired):
 			return TransactionSummary{}, apperror.Conflict("unit kondisi BAD perlu konfirmasi (confirmed=true) untuk dijual ke pelanggan", nil)
+		case errors.Is(err, repository.ErrSerialNumberTaken):
+			return TransactionSummary{}, apperror.Conflict("serial_number sudah dipakai", nil)
 		case errors.Is(err, repository.ErrTransactionCodeGenerationFailed):
 			return TransactionSummary{}, apperror.Conflict("gagal membuat kode transaksi unik, coba lagi", nil)
 		default:
@@ -316,17 +380,17 @@ func (s *transactionService) CreateSale(ctx context.Context, input CreateSaleInp
 		}
 	}
 
-	itemSummaries := make([]TransactionItemSummary, 0, len(items))
-	for i, it := range items {
+	itemSummaries := make([]TransactionItemSummary, 0, len(results))
+	for _, r := range results {
 		itemSummaries = append(itemSummaries, TransactionItemSummary{
-			PublicID:          it.PublicID,
-			StockItemPublicID: stockItemRefs[i].PublicID,
-			Barcode:           stockItemRefs[i].Barcode,
-			SerialNumber:      stockItemRefs[i].SerialNumber,
-			ProductName:       it.ProductName,
-			WeightGram:        it.WeightGram,
-			PricePerGram:      it.PricePerGram,
-			PriceTotal:        it.PriceTotal,
+			PublicID:          r.TransactionItem.PublicID,
+			StockItemPublicID: r.StockItemPublicID,
+			Barcode:           r.Barcode,
+			SerialNumber:      r.SerialNumber,
+			ProductName:       r.TransactionItem.ProductName,
+			WeightGram:        r.TransactionItem.WeightGram,
+			PricePerGram:      r.TransactionItem.PricePerGram,
+			PriceTotal:        r.TransactionItem.PriceTotal,
 		})
 	}
 
