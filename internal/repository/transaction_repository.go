@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -104,10 +105,15 @@ type TransactionWithParties struct {
 	SupplierAddress *string
 }
 
-// TransactionFilter narrows TransactionRepository.ListByCustomer.
+// TransactionFilter narrows TransactionRepository.ListByCustomer and List.
+// Type/DateFrom/DateTo are only honored by List — ListByCustomer ignores
+// them (it always filters type IN ('SELL', 'BUY') for one customer).
 type TransactionFilter struct {
-	Page  int
-	Limit int
+	Page     int
+	Limit    int
+	Type     *string
+	DateFrom *time.Time
+	DateTo   *time.Time
 }
 
 // SaleItemInput is one scanned unit going into a sale — StockItemID is the
@@ -178,6 +184,12 @@ type TransactionRepository interface {
 	// for one customer, newest first, plus the total count ignoring
 	// pagination.
 	ListByCustomer(ctx context.Context, customerID int64, filter TransactionFilter) ([]model.Transaction, int, error)
+	// List returns transactions of any type, newest first, optionally
+	// filtered by type and created_at date range (same day-range semantics
+	// as the report endpoints) — the per-transaction backing list for the
+	// sales/buyback screens, so those screens aren't stuck with the
+	// aggregate-only /reports/transactions summary.
+	List(ctx context.Context, filter TransactionFilter) ([]model.Transaction, int, error)
 	// FindByPublicID returns one transaction with its full
 	// transaction_items (each joined with its stock item's public_id/barcode),
 	// regardless of type — used for the detail/struk view.
@@ -554,6 +566,56 @@ func (r *transactionRepository) ListByCustomer(ctx context.Context, customerID i
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, fmt.Errorf("list customer transactions: %w", err)
+	}
+	return transactions, total, nil
+}
+
+func (r *transactionRepository) List(ctx context.Context, filter TransactionFilter) ([]model.Transaction, int, error) {
+	var conditions []string
+	var args []any
+
+	if filter.Type != nil {
+		args = append(args, *filter.Type)
+		conditions = append(conditions, fmt.Sprintf("type = $%d", len(args)))
+	}
+	if filter.DateFrom != nil {
+		args = append(args, *filter.DateFrom)
+		conditions = append(conditions, fmt.Sprintf("created_at::date >= $%d", len(args)))
+	}
+	if filter.DateTo != nil {
+		args = append(args, *filter.DateTo)
+		conditions = append(conditions, fmt.Sprintf("created_at::date <= $%d", len(args)))
+	}
+	where := ""
+	if len(conditions) > 0 {
+		where = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	var total int
+	if err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM transactions `+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count transactions: %w", err)
+	}
+
+	args = append(args, filter.Limit, (filter.Page-1)*filter.Limit)
+	query := `SELECT ` + transactionColumns + ` FROM transactions ` + where +
+		fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
+
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list transactions: %w", err)
+	}
+	defer rows.Close()
+
+	var transactions []model.Transaction
+	for rows.Next() {
+		var t model.Transaction
+		if err := scanTransaction(rows, &t); err != nil {
+			return nil, 0, fmt.Errorf("scan transaction row: %w", err)
+		}
+		transactions = append(transactions, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("list transactions: %w", err)
 	}
 	return transactions, total, nil
 }

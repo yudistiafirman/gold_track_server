@@ -237,6 +237,43 @@ func (h *TransactionHandler) ListByCustomer(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+// List returns transactions across all customers/suppliers, newest first,
+// optionally filtered by ?type= and ?from=/?to= (YYYY-MM-DD, inclusive) —
+// backs the sales/buyback list screens. Unlike /reports/transactions (which
+// stays aggregate-only), this returns one row per transaction.
+func (h *TransactionHandler) List(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+
+	result, err := h.transactionService.List(r.Context(), service.ListTransactionsInput{
+		Type:     q.Get("type"),
+		DateFrom: q.Get("from"),
+		DateTo:   q.Get("to"),
+		Page:     page,
+		Limit:    limit,
+	})
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	items := make([]transactionSummaryResponse, 0, len(result.Items))
+	for _, t := range result.Items {
+		items = append(items, toTransactionSummaryResponse(t))
+	}
+
+	response.JSON(w, http.StatusOK, transactionListResponse{
+		Items: items,
+		Pagination: paginationResponse{
+			Page:       result.Page,
+			Limit:      result.Limit,
+			Total:      result.Total,
+			TotalPages: result.TotalPages,
+		},
+	})
+}
+
 // Get returns one transaction's full detail (with items).
 func (h *TransactionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id, err := publicIDParam(r)

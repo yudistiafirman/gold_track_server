@@ -68,6 +68,7 @@ func NewRouter(
 			r.Get("/stock-items/{id}", stockItemHandler.Get)
 			r.Get("/stock-items/{id}/label", stockItemHandler.GetLabel)
 			r.Post("/transactions", transactionHandler.Create)
+			r.Get("/transactions", transactionHandler.List)
 			r.Get("/transactions/{id}", transactionHandler.Get)
 			r.Get("/transactions/{id}/receipt", transactionHandler.GetReceipt)
 			r.Get("/gold-prices/active", goldPriceHandler.GetActive)

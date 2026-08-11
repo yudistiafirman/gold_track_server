@@ -105,6 +105,18 @@ type ListCustomerTransactionsInput struct {
 	Limit            int
 }
 
+// ListTransactionsInput backs the general (not customer/supplier-scoped)
+// transaction list — Type/DateFrom/DateTo are all optional, same semantics
+// as TransactionReportInput (allowedTransactionReportTypes, YYYY-MM-DD,
+// inclusive day-range on created_at).
+type ListTransactionsInput struct {
+	Type     string
+	DateFrom string
+	DateTo   string
+	Page     int
+	Limit    int
+}
+
 // ReceiptPartySummary is the counterparty (customer or supplier) shown on
 // a receipt — only one of Customer/Supplier is ever populated on
 // ReceiptSummary, matching the transaction's type.
@@ -143,6 +155,7 @@ type TransactionService interface {
 	CreateSale(ctx context.Context, input CreateSaleInput) (TransactionSummary, error)
 	CreateBuy(ctx context.Context, input CreateBuyInput) (TransactionSummary, error)
 	ListByCustomer(ctx context.Context, input ListCustomerTransactionsInput) (TransactionListResult, error)
+	List(ctx context.Context, input ListTransactionsInput) (TransactionListResult, error)
 	Get(ctx context.Context, publicID string) (TransactionSummary, error)
 	GetReceipt(ctx context.Context, publicID string) (ReceiptSummary, error)
 	Cancel(ctx context.Context, publicID string) (TransactionSummary, error)
@@ -447,6 +460,71 @@ func (s *transactionService) ListByCustomer(ctx context.Context, input ListCusto
 	})
 	if err != nil {
 		return TransactionListResult{}, apperror.Internal("failed to list customer transactions", err)
+	}
+
+	items := make([]TransactionSummary, 0, len(transactions))
+	for _, t := range transactions {
+		items = append(items, TransactionSummary{
+			PublicID:        t.PublicID,
+			TransactionCode: t.TransactionCode,
+			Type:            t.Type,
+			TotalAmount:     t.TotalAmount,
+			TotalWeight:     t.TotalWeight,
+			PaymentMethod:   t.PaymentMethod,
+			PaymentRef:      stringOrEmpty(t.PaymentRef),
+			Status:          t.Status,
+			CreatedAt:       t.CreatedAt,
+			CompletedAt:     t.CompletedAt,
+		})
+	}
+
+	return TransactionListResult{
+		Items:      items,
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: int(math.Ceil(float64(total) / float64(limit))),
+	}, nil
+}
+
+// List returns header-only transaction rows across all customers/suppliers,
+// optionally filtered by type and date range — backs the sales/buyback
+// list screens (as opposed to /reports/transactions, which stays
+// aggregate-only and is composed into the dashboard).
+func (s *transactionService) List(ctx context.Context, input ListTransactionsInput) (TransactionListResult, error) {
+	filter := repository.TransactionFilter{}
+
+	if input.Type != "" {
+		if _, ok := allowedTransactionReportTypes[input.Type]; !ok {
+			return TransactionListResult{}, apperror.BadRequest("type harus SELL, BUY, atau SELL_SUPPLIER", nil)
+		}
+		filter.Type = &input.Type
+	}
+
+	dateFrom, dateTo, err := parseReportDateRange(input.DateFrom, input.DateTo)
+	if err != nil {
+		return TransactionListResult{}, err
+	}
+	filter.DateFrom = dateFrom
+	filter.DateTo = dateTo
+
+	page := input.Page
+	if page <= 0 {
+		page = defaultTransactionPage
+	}
+	limit := input.Limit
+	if limit <= 0 {
+		limit = defaultTransactionLimit
+	}
+	if limit > maxTransactionLimit {
+		limit = maxTransactionLimit
+	}
+	filter.Page = page
+	filter.Limit = limit
+
+	transactions, total, err := s.transactionRepo.List(ctx, filter)
+	if err != nil {
+		return TransactionListResult{}, apperror.Internal("failed to list transactions", err)
 	}
 
 	items := make([]TransactionSummary, 0, len(transactions))
