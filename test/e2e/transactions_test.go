@@ -133,11 +133,13 @@ func TestTransactions_CreateSellArchivedUnitRejected(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 
-	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItem.ID, nil, adminToken)
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItem.ID, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -1851,6 +1853,8 @@ func TestTransactions_CancelSellArchivedUnitRevertsToAvailable(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
@@ -1864,7 +1868,7 @@ func TestTransactions_CancelSellArchivedUnitRevertsToAvailable(t *testing.T) {
 	var tx transactionDTO
 	decodeData(t, resp, &tx)
 
-	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItem.ID, nil, adminToken)
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItem.ID, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("archive sold unit: expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -1898,6 +1902,8 @@ func TestTransactions_CancelBuyArchivedUnitVoids(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 
@@ -1911,7 +1917,7 @@ func TestTransactions_CancelBuyArchivedUnitVoids(t *testing.T) {
 	decodeData(t, resp, &buyTx)
 	stockItemID := buyTx.Items[0].StockItemID
 
-	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItemID, nil, adminToken)
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItemID, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
 	}

@@ -70,7 +70,13 @@ Most resources are admin-only (`ADMIN`/`SUPER_ADMIN`) for writes; a few (`produc
 including `KASIR` because cashiers need them at checkout. `purchase-orders` and `stock-opnames` are
 strictly `ADMIN`/`SUPER_ADMIN` — no `KASIR` access at all (back-office only). `reports` (including
 `dashboard`) is stricter still — `SUPER_ADMIN` only, `ADMIN` gets 403 — business figures (revenue,
-COGS, margin) are hidden from plain `ADMIN`, same tier as `users`.
+COGS, margin) are hidden from plain `ADMIN`, same tier as `users`. `DELETE
+/api/stock-items/{id}` (archive) is the one write action split *within* an otherwise
+`ADMIN`/`SUPER_ADMIN` resource — `ADMIN` keeps Create/Update on stock items but gets 403 archiving
+one (client requirement); implemented as a `RequireRole("SUPER_ADMIN")` group nested inside the
+resource's `ADMIN`/`SUPER_ADMIN` group in `router.go`, not moved to a separate top-level
+`SUPER_ADMIN`-only group like `reports`/`balance-accounts`, so it doesn't accidentally raise the
+tier on the resource's other routes.
 
 ### ID strategy: internal BIGINT + external public_id (UUID)
 

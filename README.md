@@ -731,11 +731,17 @@ GET    /api/stock-items/lookup                 # ?barcode=&type=  cari unit buat
 GET    /api/stock-items/{id}                   # detail unit lengkap (termasuk barcode)         -> 200 / 404 (semua role, token valid)
 GET    /api/stock-items/{id}/label             # data buat cetak label CODE128                  -> 200 / 404 (semua role, token valid)
 PUT    /api/stock-items/{id}                   # edit unit, barcode & product_id terkunci        -> 200 / 404 / 409 (ADMIN & SUPER_ADMIN)
-DELETE /api/stock-items/{id}                   # arsipkan (status -> ARCHIVED), hanya unit AVAILABLE -> 200 / 404 / 409 (ADMIN & SUPER_ADMIN)
+DELETE /api/stock-items/{id}                   # arsipkan (status -> ARCHIVED), hanya unit AVAILABLE -> 200 / 404 / 409 (SUPER_ADMIN only)
 ```
 
 `{productId}` maupun `{id}` adalah `public_id` (UUID). Beda dari resource lain di API ini:
 
+- **`DELETE` (archive) khusus `SUPER_ADMIN`, lebih ketat dari `POST`/`PUT` di resource yang sama**
+  (client requirement) — `ADMIN` masih bisa create/update unit stok seperti biasa, tapi kena `403`
+  kalau coba arsipkan. Digroup nested di atas group `ADMIN`/`SUPER_ADMIN` yang sama di
+  `router.go` (`RequireRole("SUPER_ADMIN")` ekstra cuma buat route `DELETE` ini), bukan
+  dipindah ke group `SUPER_ADMIN`-only terpisah kayak `reports`/`balance-accounts` — biar
+  `Create`/`Update` unit stok yang sama tidak ikut kena batasan.
 - **`DELETE` di sini soft-delete lewat `status`, bukan `is_active`** — konsisten sama semua
   resource lain (`users`/`categories`/`brands`/`products`/`suppliers` pakai `is_active=false`),
   cuma di `stock_items` ditandai lewat nilai `status` baru, `ARCHIVED`, karena `status` di sini
@@ -2247,9 +2253,10 @@ Dua lapis test:
   criteria BE-503
 - `PUT` ke unit yang sudah `SOLD` (lewat SQL) atau `ARCHIVED` (lewat `DELETE`) → 409; `{id}` tidak
   ditemukan → 404; field invalid → 422
-- `DELETE` (ADMIN & SUPER_ADMIN) unit `AVAILABLE` → 200, lalu `GET /{id}` setelahnya tetap
-  **200** dengan `status: "ARCHIVED"` (baris tidak dihapus dari DB — ini `UPDATE`, bukan hard
-  delete)
+- `DELETE` (**SUPER_ADMIN only** — lebih ketat dari `POST`/`PUT` di resource yang sama, client
+  requirement; `ADMIN` kena 403 di sini walau masih bisa create/update unit stok) unit `AVAILABLE`
+  → 200, lalu `GET /{id}` setelahnya tetap **200** dengan `status: "ARCHIVED"` (baris tidak
+  dihapus dari DB — ini `UPDATE`, bukan hard delete)
 - `DELETE` unit yang sudah `SOLD` (di-set langsung lewat SQL fixture, termasuk `sold_at`) → juga
   **berhasil** (200), `GET` setelahnya → `status: "ARCHIVED"` **dan** `sold_at` tetap sama persis
   kayak sebelum diarsipkan (guard di level SQL `AND status IN ('AVAILABLE', 'SOLD')` di

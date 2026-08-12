@@ -372,13 +372,15 @@ func TestStockItems_ListHidesDeadStatusesByDefaultButShowsOnExplicitFilter(t *te
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 
 	kept := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "SN-KEEP"}))
 
 	archived := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "SN-ARC"}))
-	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+archived.ID, nil, adminToken)
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+archived.ID, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -592,10 +594,12 @@ func TestStockItems_UpdateArchivedUnitRejected(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
 
-	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -642,14 +646,24 @@ func TestStockItems_DeleteRequiresAuth(t *testing.T) {
 	}
 }
 
-func TestStockItems_DeleteNonAdminForbidden(t *testing.T) {
+// TestStockItems_DeleteNonSuperAdminForbidden covers the client requirement
+// that archiving a stock item is SUPER_ADMIN-only — plain ADMIN keeps
+// Create/Update on stock items but not Delete, same tier as KASIR here.
+func TestStockItems_DeleteNonSuperAdminForbidden(t *testing.T) {
 	resetDB(t)
 	kasir := seedUser(t, "KASIR", true)
-	token := login(t, kasir.Email, kasir.Password)
+	kasirToken := login(t, kasir.Email, kasir.Password)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
 
-	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+nonexistentUUID, nil, token)
-	if status != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d (resp=%+v)", status, resp)
+	for _, tc := range []struct {
+		role  string
+		token string
+	}{{"KASIR", kasirToken}, {"ADMIN", adminToken}} {
+		status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+nonexistentUUID, nil, tc.token)
+		if status != http.StatusForbidden {
+			t.Fatalf("delete as %s: expected 403, got %d (resp=%+v)", tc.role, status, resp)
+		}
 	}
 }
 
@@ -657,10 +671,12 @@ func TestStockItems_DeleteAvailableArchives(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
 
-	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("delete: expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -685,6 +701,8 @@ func TestStockItems_DeleteSoldUnitArchives(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
 	markStockItemSold(t, created.ID)
@@ -696,7 +714,7 @@ func TestStockItems_DeleteSoldUnitArchives(t *testing.T) {
 	var beforeArchive stockItemDTO
 	decodeData(t, resp, &beforeArchive)
 
-	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -719,15 +737,17 @@ func TestStockItems_DeleteAlreadyArchivedRejected(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
 
-	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("first archive: expected 200, got %d (resp=%+v)", status, resp)
 	}
 
-	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, superAdminToken)
 	if status != http.StatusConflict {
 		t.Fatalf("expected 409 archiving an already-archived unit, got %d (resp=%+v)", status, resp)
 	}
@@ -741,6 +761,8 @@ func TestStockItems_DeleteVoidUnitRejected(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 
@@ -758,7 +780,7 @@ func TestStockItems_DeleteVoidUnitRejected(t *testing.T) {
 		t.Fatalf("cancel buy: expected 200, got %d (resp=%+v)", status, resp)
 	}
 
-	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItemID, nil, adminToken)
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItemID, nil, superAdminToken)
 	if status != http.StatusConflict {
 		t.Fatalf("expected 409 archiving a VOID unit, got %d (resp=%+v)", status, resp)
 	}
@@ -774,6 +796,8 @@ func TestStockItems_DeleteReferencedByBuyTransactionSucceeds(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 
@@ -787,7 +811,7 @@ func TestStockItems_DeleteReferencedByBuyTransactionSucceeds(t *testing.T) {
 	decodeData(t, resp, &tx)
 	stockItemID := tx.Items[0].StockItemID
 
-	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItemID, nil, adminToken)
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+stockItemID, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -811,6 +835,8 @@ func TestStockItems_DeleteReferencedByStockOpnameSucceeds(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
 
@@ -820,7 +846,7 @@ func TestStockItems_DeleteReferencedByStockOpnameSucceeds(t *testing.T) {
 		t.Fatalf("scan: expected 200, got %d (resp=%+v)", status, resp)
 	}
 
-	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	status, resp = doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
 	}
@@ -828,10 +854,10 @@ func TestStockItems_DeleteReferencedByStockOpnameSucceeds(t *testing.T) {
 
 func TestStockItems_DeleteNotFound(t *testing.T) {
 	resetDB(t)
-	admin := seedUser(t, "ADMIN", true)
-	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 
-	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+nonexistentUUID, nil, adminToken)
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+nonexistentUUID, nil, superAdminToken)
 	if status != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d (resp=%+v)", status, resp)
 	}
@@ -966,10 +992,12 @@ func TestStockItems_LookupArchivedConflict(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
+	superAdmin := seedUser(t, "SUPER_ADMIN", true)
+	superAdminToken := login(t, superAdmin.Email, superAdmin.Password)
 	product := stockItemFixtureProduct(t, adminToken)
 	created := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
 
-	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, adminToken)
+	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+created.ID, nil, superAdminToken)
 	if status != http.StatusOK {
 		t.Fatalf("archive: expected 200, got %d (resp=%+v)", status, resp)
 	}

@@ -111,7 +111,13 @@ func NewRouter(
 				r.Delete("/products/{id}", productHandler.Delete)
 				r.Post("/products/{productId}/stock-items", stockItemHandler.Create)
 				r.Put("/stock-items/{id}", stockItemHandler.Update)
-				r.Delete("/stock-items/{id}", stockItemHandler.Delete)
+				// Archiving a stock item is SUPER_ADMIN-only (client requirement) —
+				// nested on top of the ADMIN/SUPER_ADMIN group above so plain ADMIN
+				// still keeps Create/Update, just not Delete.
+				r.Group(func(r chi.Router) {
+					r.Use(appmw.RequireRole("SUPER_ADMIN"))
+					r.Delete("/stock-items/{id}", stockItemHandler.Delete)
+				})
 				r.Route("/suppliers", func(r chi.Router) {
 					r.Get("/", supplierHandler.List)
 					r.Post("/", supplierHandler.Create)
