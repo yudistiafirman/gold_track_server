@@ -47,25 +47,53 @@ type StockOpnameSummaryCounts struct {
 }
 
 // ScanStockOpnameResult pairs the just-scanned item with the session's
-// current NotScanned count, so the scanning screen can show "still N left"
-// live after every scan instead of only surfacing it once Complete runs.
+// current NotScanned count (plus the detail behind it), so the scanning
+// screen can show "still N left" — and what those N are — live after every
+// scan instead of only surfacing it once Complete runs.
 type ScanStockOpnameResult struct {
-	Item       StockOpnameItemSummary
-	NotScanned int
+	Item               StockOpnameItemSummary
+	NotScanned         int
+	NotScannedItems    []NotScannedItem
+	NotScannedByWeight []NotScannedWeightGroup
+}
+
+// NotScannedItem is an AVAILABLE stock item still unscanned in a session,
+// with the fields the UI needs to list it (sku/weight_gram in particular,
+// for grouping).
+type NotScannedItem struct {
+	StockItemPublicID string
+	Barcode           string
+	SKU               string
+	ProductName       string
+	WeightGram        float64
+}
+
+// NotScannedWeightGroup aggregates NotScannedItems by weight_gram — a
+// single grand total across every weight isn't meaningful for a physical
+// gold count, so unscanned units are grouped and counted per weight
+// instead (e.g. "5 gram: 3 unit").
+type NotScannedWeightGroup struct {
+	WeightGram      float64
+	Count           int
+	TotalWeightGram float64
 }
 
 // StockOpnameSummary is the public-facing view of an opname session — only
 // PublicID (UUID) ever leaves this layer. Items is empty right after
 // Create (no scans yet); Summary is always computed fresh from Items.
+// NotScannedItems/NotScannedByWeight follow the same rule as
+// Summary.NotScanned — only populated while IN_PROGRESS.
 type StockOpnameSummary struct {
-	PublicID   string
-	OpnameCode string
-	OpnameDate string
-	Status     string
-	Notes      string
-	Items      []StockOpnameItemSummary
-	Summary    StockOpnameSummaryCounts
-	CreatedAt  time.Time
+	PublicID           string
+	OpnameCode         string
+	OpnameDate         string
+	Status             string
+	Notes              string
+	Items              []StockOpnameItemSummary
+	Summary            StockOpnameSummaryCounts
+	NotScannedItems    []NotScannedItem
+	NotScannedByWeight []NotScannedWeightGroup
+	CreatedAt          time.Time
 }
 
 type CreateStockOpnameInput struct {
@@ -189,11 +217,13 @@ func (s *stockOpnameService) Get(ctx context.Context, publicID string) (StockOpn
 
 	summary := toStockOpnameSummary(opname, items)
 	if opname.Status == "IN_PROGRESS" {
-		pending, err := s.stockOpnameRepo.PendingCount(ctx, opname.ID)
+		pending, err := s.stockOpnameRepo.PendingItems(ctx, opname.ID)
 		if err != nil {
-			return StockOpnameSummary{}, apperror.Internal("failed to count pending stock opname items", err)
+			return StockOpnameSummary{}, apperror.Internal("failed to list pending stock opname items", err)
 		}
-		summary.Summary.NotScanned = pending
+		summary.Summary.NotScanned = len(pending)
+		summary.NotScannedItems = toNotScannedItems(pending)
+		summary.NotScannedByWeight = groupNotScannedByWeight(pending)
 	}
 	return summary, nil
 }
@@ -219,14 +249,16 @@ func (s *stockOpnameService) Scan(ctx context.Context, opnamePublicID, barcode s
 		}
 	}
 
-	pending, err := s.stockOpnameRepo.PendingCount(ctx, item.OpnameID)
+	pending, err := s.stockOpnameRepo.PendingItems(ctx, item.OpnameID)
 	if err != nil {
-		return ScanStockOpnameResult{}, apperror.Internal("failed to count pending stock opname items", err)
+		return ScanStockOpnameResult{}, apperror.Internal("failed to list pending stock opname items", err)
 	}
 
 	return ScanStockOpnameResult{
-		Item:       toStockOpnameItemSummary(*item),
-		NotScanned: pending,
+		Item:               toStockOpnameItemSummary(*item),
+		NotScanned:         len(pending),
+		NotScannedItems:    toNotScannedItems(pending),
+		NotScannedByWeight: groupNotScannedByWeight(pending),
 	}, nil
 }
 
@@ -264,6 +296,42 @@ func toStockOpnameItemSummary(it repository.StockOpnameItemWithStockRef) StockOp
 		PhysicalStatus:    physicalStatus,
 		Result:            it.Result,
 	}
+}
+
+func toNotScannedItems(items []repository.PendingStockItem) []NotScannedItem {
+	out := make([]NotScannedItem, 0, len(items))
+	for _, it := range items {
+		out = append(out, NotScannedItem{
+			StockItemPublicID: it.StockItemPublicID,
+			Barcode:           it.Barcode,
+			SKU:               it.SKU,
+			ProductName:       it.ProductName,
+			WeightGram:        it.WeightGram,
+		})
+	}
+	return out
+}
+
+// groupNotScannedByWeight aggregates not-yet-scanned units by weight_gram
+// (items is already ORDER BY weight_gram from the repo, so a linear scan
+// keeps groups in ascending weight order without a separate sort step).
+func groupNotScannedByWeight(items []repository.PendingStockItem) []NotScannedWeightGroup {
+	groups := make([]NotScannedWeightGroup, 0)
+	index := make(map[float64]int)
+	for _, it := range items {
+		if i, ok := index[it.WeightGram]; ok {
+			groups[i].Count++
+			groups[i].TotalWeightGram += it.WeightGram
+			continue
+		}
+		index[it.WeightGram] = len(groups)
+		groups = append(groups, NotScannedWeightGroup{
+			WeightGram:      it.WeightGram,
+			Count:           1,
+			TotalWeightGram: it.WeightGram,
+		})
+	}
+	return groups
 }
 
 func toStockOpnameSummary(o *model.StockOpname, items []repository.StockOpnameItemWithStockRef) StockOpnameSummary {

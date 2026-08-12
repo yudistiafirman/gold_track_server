@@ -103,12 +103,23 @@ type StockOpnameRepository interface {
 	// among this opname's items (single set-based INSERT...SELECT), then
 	// flips status to COMPLETED — all in one DB transaction.
 	Complete(ctx context.Context, publicID string) error
-	// PendingCount returns how many AVAILABLE stock items have not yet been
-	// scanned in this session — exactly what Complete would insert as
-	// MISSING rows if run right now. Lets the UI warn the user before they
-	// complete a session that still has unscanned units, instead of only
-	// finding out after (see stock_opname_service.go's use in Get/Scan).
-	PendingCount(ctx context.Context, opnameID int64) (int, error)
+	// PendingItems returns every AVAILABLE stock item not yet scanned in
+	// this session — exactly what Complete would insert as MISSING rows if
+	// run right now — joined with product sku/name/weight_gram so the UI
+	// can list and group them by weight before Complete (see
+	// stock_opname_service.go's use in Get/Scan).
+	PendingItems(ctx context.Context, opnameID int64) ([]PendingStockItem, error)
+}
+
+// PendingStockItem is an AVAILABLE stock item not yet scanned in an opname
+// session, carrying the product fields the FE needs to display and group
+// it by weight.
+type PendingStockItem struct {
+	StockItemPublicID string
+	Barcode           string
+	SKU               string
+	ProductName       string
+	WeightGram        float64
 }
 
 type stockOpnameRepository struct {
@@ -389,19 +400,34 @@ func (r *stockOpnameRepository) Complete(ctx context.Context, publicID string) e
 	return nil
 }
 
-func (r *stockOpnameRepository) PendingCount(ctx context.Context, opnameID int64) (int, error) {
+func (r *stockOpnameRepository) PendingItems(ctx context.Context, opnameID int64) ([]PendingStockItem, error) {
 	const query = `
-		SELECT COUNT(*)
+		SELECT si.public_id::text, si.barcode, p.sku, p.name, p.weight_gram::float8
 		FROM stock_items si
+		JOIN products p ON p.id = si.product_id
 		WHERE si.status = 'AVAILABLE'
 		  AND NOT EXISTS (
 		    SELECT 1 FROM stock_opname_items soi
 		    WHERE soi.opname_id = $1 AND soi.stock_item_id = si.id
 		  )
+		ORDER BY p.weight_gram, p.sku, si.barcode
 	`
-	var count int
-	if err := r.db.QueryRow(ctx, query, opnameID).Scan(&count); err != nil {
-		return 0, fmt.Errorf("count pending stock opname items: %w", err)
+	rows, err := r.db.Query(ctx, query, opnameID)
+	if err != nil {
+		return nil, fmt.Errorf("list pending stock opname items: %w", err)
 	}
-	return count, nil
+	defer rows.Close()
+
+	items := make([]PendingStockItem, 0)
+	for rows.Next() {
+		var it PendingStockItem
+		if err := rows.Scan(&it.StockItemPublicID, &it.Barcode, &it.SKU, &it.ProductName, &it.WeightGram); err != nil {
+			return nil, fmt.Errorf("scan pending stock opname item row: %w", err)
+		}
+		items = append(items, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list pending stock opname items: %w", err)
+	}
+	return items, nil
 }

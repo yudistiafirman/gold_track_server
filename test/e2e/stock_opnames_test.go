@@ -18,10 +18,12 @@ type stockOpnameItemDTO struct {
 }
 
 // scanStockOpnameItemDTO decodes a POST .../scan response — the scanned
-// item's fields plus the running not_scanned count.
+// item's fields plus the running not_scanned count/detail.
 type scanStockOpnameItemDTO struct {
 	stockOpnameItemDTO
-	NotScanned int `json:"not_scanned"`
+	NotScanned         int                            `json:"not_scanned"`
+	NotScannedItems    []stockOpnameNotScannedItemDTO `json:"not_scanned_items"`
+	NotScannedByWeight []stockOpnameWeightGroupDTO    `json:"not_scanned_by_weight"`
 }
 
 type stockOpnameSummaryCountsDTO struct {
@@ -31,14 +33,33 @@ type stockOpnameSummaryCountsDTO struct {
 	NotScanned int `json:"not_scanned"`
 }
 
+// stockOpnameNotScannedItemDTO is an AVAILABLE stock item still unscanned
+// in an IN_PROGRESS session.
+type stockOpnameNotScannedItemDTO struct {
+	StockItemID string  `json:"stock_item_id"`
+	Barcode     string  `json:"barcode"`
+	SKU         string  `json:"sku"`
+	ProductName string  `json:"product_name"`
+	WeightGram  float64 `json:"weight_gram"`
+}
+
+// stockOpnameWeightGroupDTO is not-yet-scanned units grouped by weight_gram.
+type stockOpnameWeightGroupDTO struct {
+	WeightGram      float64 `json:"weight_gram"`
+	Count           int     `json:"count"`
+	TotalWeightGram float64 `json:"total_weight_gram"`
+}
+
 type stockOpnameDTO struct {
-	ID         string                      `json:"id"`
-	OpnameCode string                      `json:"opname_code"`
-	OpnameDate string                      `json:"opname_date"`
-	Status     string                      `json:"status"`
-	Notes      string                      `json:"notes"`
-	Items      []stockOpnameItemDTO        `json:"items"`
-	Summary    stockOpnameSummaryCountsDTO `json:"summary"`
+	ID                 string                         `json:"id"`
+	OpnameCode         string                         `json:"opname_code"`
+	OpnameDate         string                         `json:"opname_date"`
+	Status             string                         `json:"status"`
+	Notes              string                         `json:"notes"`
+	Items              []stockOpnameItemDTO           `json:"items"`
+	Summary            stockOpnameSummaryCountsDTO    `json:"summary"`
+	NotScannedItems    []stockOpnameNotScannedItemDTO `json:"not_scanned_items"`
+	NotScannedByWeight []stockOpnameWeightGroupDTO    `json:"not_scanned_by_weight"`
 }
 
 func createStockOpname(t *testing.T, adminToken string) stockOpnameDTO {
@@ -350,6 +371,84 @@ func TestStockOpnames_NotScannedCountVisibleBeforeComplete(t *testing.T) {
 	decodeData(t, resp, &completed)
 	if completed.Summary.NotScanned != 0 || completed.Summary.Missing != 2 {
 		t.Fatalf("expected not_scanned=0 missing=2 after complete, got %+v", completed.Summary)
+	}
+}
+
+// TestStockOpnames_NotScannedItemsGroupedByWeight guards the client
+// complaint this feature fixes: knowing "3 units left" isn't enough to go
+// find them physically — the UI needs the sku/weight of each unscanned
+// unit, and a per-weight total (not one grand total across every weight,
+// since a 5-gram bar and a 10-gram bar aren't fungible for a physical
+// count).
+func TestStockOpnames_NotScannedItemsGroupedByWeight(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	category := createCategory(t, adminToken, "Batangan")
+	brand := createBrand(t, adminToken, "Antam")
+	product5g := createProduct(t, adminToken, "Emas Batangan 5gr", category.ID, brand.ID, 5)
+	product10g := createProduct(t, adminToken, "Emas Batangan 10gr", category.ID, brand.ID, 10)
+
+	scanned := createStockItemAPI(t, adminToken, product5g.ID, validStockItemBody(map[string]any{"serial_number": "WEIGHT-SN-1"}))
+	_ = createStockItemAPI(t, adminToken, product5g.ID, validStockItemBody(map[string]any{"serial_number": "WEIGHT-SN-2"}))
+	_ = createStockItemAPI(t, adminToken, product10g.ID, validStockItemBody(map[string]any{"serial_number": "WEIGHT-SN-3"}))
+
+	opname := createStockOpname(t, adminToken)
+
+	// Before any scan: 2x 5-gram + 1x 10-gram, all still unscanned.
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-opnames/"+opname.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockOpnameDTO
+	decodeData(t, resp, &fetched)
+	if len(fetched.NotScannedItems) != 3 {
+		t.Fatalf("expected 3 not_scanned_items, got %+v", fetched.NotScannedItems)
+	}
+	if len(fetched.NotScannedByWeight) != 2 {
+		t.Fatalf("expected 2 weight groups (5g, 10g), got %+v", fetched.NotScannedByWeight)
+	}
+	group5g, group10g := fetched.NotScannedByWeight[0], fetched.NotScannedByWeight[1]
+	if group5g.WeightGram != 5 || group5g.Count != 2 || group5g.TotalWeightGram != 10 {
+		t.Fatalf("expected 5g group {weight:5 count:2 total:10}, got %+v", group5g)
+	}
+	if group10g.WeightGram != 10 || group10g.Count != 1 || group10g.TotalWeightGram != 10 {
+		t.Fatalf("expected 10g group {weight:10 count:1 total:10}, got %+v", group10g)
+	}
+	for _, it := range fetched.NotScannedItems {
+		if it.SKU == "" || it.ProductName == "" || it.Barcode == "" || it.StockItemID == "" {
+			t.Fatalf("expected sku/product_name/barcode/stock_item_id populated, got %+v", it)
+		}
+	}
+
+	// Scanning one 5-gram unit drops that group's count to 1 — the scan
+	// response itself reflects it immediately, without a separate GET.
+	status, resp = doRequest(t, http.MethodPost, "/api/stock-opnames/"+opname.ID+"/scan", map[string]any{"barcode": scanned.Barcode}, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("scan: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var scanResult scanStockOpnameItemDTO
+	decodeData(t, resp, &scanResult)
+	if len(scanResult.NotScannedItems) != 2 {
+		t.Fatalf("expected 2 not_scanned_items after scanning 1 of 3, got %+v", scanResult.NotScannedItems)
+	}
+	if len(scanResult.NotScannedByWeight) != 2 {
+		t.Fatalf("expected both weight groups to remain, got %+v", scanResult.NotScannedByWeight)
+	}
+	if scanResult.NotScannedByWeight[0].WeightGram != 5 || scanResult.NotScannedByWeight[0].Count != 1 {
+		t.Fatalf("expected 5g group to drop to count=1, got %+v", scanResult.NotScannedByWeight[0])
+	}
+
+	// Once completed, the pending breakdown is empty — those units are now
+	// MISSING items instead of a pending list.
+	status, resp = doRequest(t, http.MethodPost, "/api/stock-opnames/"+opname.ID+"/complete", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("complete: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var completed stockOpnameDTO
+	decodeData(t, resp, &completed)
+	if len(completed.NotScannedItems) != 0 || len(completed.NotScannedByWeight) != 0 {
+		t.Fatalf("expected empty pending breakdown after complete, got items=%+v weight=%+v", completed.NotScannedItems, completed.NotScannedByWeight)
 	}
 }
 

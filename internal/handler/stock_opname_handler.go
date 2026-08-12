@@ -49,17 +49,71 @@ type stockOpnameSummaryResponse struct {
 	NotScanned int `json:"not_scanned"`
 }
 
+// stockOpnameNotScannedItemResponse is an AVAILABLE stock item not yet
+// scanned in an IN_PROGRESS session — sku/weight_gram in particular are
+// what let the UI list and group these by weight before Complete.
+type stockOpnameNotScannedItemResponse struct {
+	StockItemID string  `json:"stock_item_id"`
+	Barcode     string  `json:"barcode"`
+	SKU         string  `json:"sku"`
+	ProductName string  `json:"product_name"`
+	WeightGram  float64 `json:"weight_gram"`
+}
+
+func toStockOpnameNotScannedItemResponse(it service.NotScannedItem) stockOpnameNotScannedItemResponse {
+	return stockOpnameNotScannedItemResponse{
+		StockItemID: it.StockItemPublicID,
+		Barcode:     it.Barcode,
+		SKU:         it.SKU,
+		ProductName: it.ProductName,
+		WeightGram:  it.WeightGram,
+	}
+}
+
+func toStockOpnameNotScannedItemResponses(items []service.NotScannedItem) []stockOpnameNotScannedItemResponse {
+	out := make([]stockOpnameNotScannedItemResponse, 0, len(items))
+	for _, it := range items {
+		out = append(out, toStockOpnameNotScannedItemResponse(it))
+	}
+	return out
+}
+
+// stockOpnameWeightGroupResponse is not-yet-scanned units grouped by
+// weight_gram — e.g. "5 gram: 3 unit" — instead of one grand total across
+// every weight, which isn't meaningful for a physical gold count.
+type stockOpnameWeightGroupResponse struct {
+	WeightGram      float64 `json:"weight_gram"`
+	Count           int     `json:"count"`
+	TotalWeightGram float64 `json:"total_weight_gram"`
+}
+
+func toStockOpnameWeightGroupResponses(groups []service.NotScannedWeightGroup) []stockOpnameWeightGroupResponse {
+	out := make([]stockOpnameWeightGroupResponse, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, stockOpnameWeightGroupResponse{
+			WeightGram:      g.WeightGram,
+			Count:           g.Count,
+			TotalWeightGram: g.TotalWeightGram,
+		})
+	}
+	return out
+}
+
 // stockOpnameResponse.Items is omitted (empty) right after Create — no
-// scans yet. Get/Complete always populate it.
+// scans yet. Get/Complete always populate it. NotScannedItems/
+// NotScannedByWeight follow Summary.NotScanned's own rule — only
+// non-empty while the session is IN_PROGRESS.
 type stockOpnameResponse struct {
-	ID         string                     `json:"id"`
-	OpnameCode string                     `json:"opname_code"`
-	OpnameDate string                     `json:"opname_date"`
-	Status     string                     `json:"status"`
-	Notes      string                     `json:"notes"`
-	Items      []stockOpnameItemResponse  `json:"items,omitempty"`
-	Summary    stockOpnameSummaryResponse `json:"summary"`
-	CreatedAt  time.Time                  `json:"created_at"`
+	ID                 string                              `json:"id"`
+	OpnameCode         string                              `json:"opname_code"`
+	OpnameDate         string                              `json:"opname_date"`
+	Status             string                              `json:"status"`
+	Notes              string                              `json:"notes"`
+	Items              []stockOpnameItemResponse           `json:"items,omitempty"`
+	Summary            stockOpnameSummaryResponse          `json:"summary"`
+	NotScannedItems    []stockOpnameNotScannedItemResponse `json:"not_scanned_items,omitempty"`
+	NotScannedByWeight []stockOpnameWeightGroupResponse    `json:"not_scanned_by_weight,omitempty"`
+	CreatedAt          time.Time                           `json:"created_at"`
 }
 
 func toStockOpnameResponse(o service.StockOpnameSummary) stockOpnameResponse {
@@ -80,7 +134,9 @@ func toStockOpnameResponse(o service.StockOpnameSummary) stockOpnameResponse {
 			Unexpected: o.Summary.Unexpected,
 			NotScanned: o.Summary.NotScanned,
 		},
-		CreatedAt: o.CreatedAt,
+		NotScannedItems:    toStockOpnameNotScannedItemResponses(o.NotScannedItems),
+		NotScannedByWeight: toStockOpnameWeightGroupResponses(o.NotScannedByWeight),
+		CreatedAt:          o.CreatedAt,
 	}
 }
 
@@ -173,11 +229,14 @@ type scanStockOpnameRequest struct {
 }
 
 // scanStockOpnameResponse embeds the scanned item's fields plus how many
-// AVAILABLE units are still unscanned in this session, so the scanning
-// screen can show a live "N belum discan" without a separate fetch.
+// AVAILABLE units are still unscanned in this session (and what those are,
+// grouped by weight), so the scanning screen can show a live "N belum
+// discan" — broken down by gramasi — without a separate fetch.
 type scanStockOpnameResponse struct {
 	stockOpnameItemResponse
-	NotScanned int `json:"not_scanned"`
+	NotScanned         int                                 `json:"not_scanned"`
+	NotScannedItems    []stockOpnameNotScannedItemResponse `json:"not_scanned_items,omitempty"`
+	NotScannedByWeight []stockOpnameWeightGroupResponse    `json:"not_scanned_by_weight,omitempty"`
 }
 
 // Scan returns only the single scanned item (plus the running not-scanned
@@ -206,6 +265,8 @@ func (h *StockOpnameHandler) Scan(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, scanStockOpnameResponse{
 		stockOpnameItemResponse: toStockOpnameItemResponse(result.Item),
 		NotScanned:              result.NotScanned,
+		NotScannedItems:         toStockOpnameNotScannedItemResponses(result.NotScannedItems),
+		NotScannedByWeight:      toStockOpnameWeightGroupResponses(result.NotScannedByWeight),
 	})
 }
 

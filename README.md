@@ -1485,6 +1485,19 @@ Sebelum ini `MISSING` cuma ketahuan **setelah** `complete` (yang langsung nutup 
 ternyata masih ada yang kelewat, satu-satunya jalan adalah bikin sesi opname baru dari awal — field
 ini yang dipakai buat nutup gap itu.
 
+Dua field tambahan ikut field `not_scanned` di atas (di response `scan` **dan** `GET /{id}`, sama-sama
+cuma keisi selagi sesi `IN_PROGRESS` — kosong lagi begitu `COMPLETED`, sama seperti `not_scanned`
+balik ke `0`):
+- `not_scanned_items[]` — daftar tiap unit `AVAILABLE` yang belum discan: `stock_item_id`,
+  `barcode`, `sku`, `product_name`, `weight_gram`. Sebelumnya cuma ada jumlahnya (`not_scanned`),
+  tidak ada cara tahu unit mana saja tanpa `complete` (yang langsung nutup sesi) — field ini yang
+  dipakai buat nutup gap itu, biar user bisa lihat persis barang mana yang masih harus dicari
+  secara fisik sebelum `complete`.
+- `not_scanned_by_weight[]` — `not_scanned_items[]` yang sama, dikelompokkan per `weight_gram`:
+  `{weight_gram, count, total_weight_gram}`, urut menaik. Sengaja **bukan** satu total gabungan
+  lintas berat (bar 5 gram dan 10 gram bukan barang yang sama secara fisik), jadi totalnya
+  dipecah per gramasi — mis. "5 gram: 3 unit (15 gram)", "10 gram: 1 unit (10 gram)".
+
 `POST /{id}/complete` menutup sesi: tiap unit `stock_items.status=AVAILABLE` yang **belum pernah
 discan** di sesi ini otomatis dapat baris `system_status=AVAILABLE`, `physical_status=NOT_FOUND`,
 `result=MISSING` (satu `INSERT ... SELECT ... WHERE NOT EXISTS` atomik, bukan loop per unit), lalu
@@ -1565,7 +1578,7 @@ Contoh response `POST /api/stock-opnames/{id}/complete` (200):
 ```
 
 Contoh response `POST /api/stock-opnames/{id}/scan` (200) — sesi ini masih `IN_PROGRESS` dengan 3
-unit `AVAILABLE` total, baru 1 yang sudah discan:
+unit `AVAILABLE` total (2x 5 gram, 1x 10 gram), baru 1 unit 10-gram yang sudah discan:
 ```json
 {
   "success": true,
@@ -1577,10 +1590,33 @@ unit `AVAILABLE` total, baru 1 yang sudah discan:
     "system_status": "AVAILABLE",
     "physical_status": "FOUND",
     "result": "MATCH",
-    "not_scanned": 2
+    "not_scanned": 2,
+    "not_scanned_items": [
+      {
+        "stock_item_id": "2b3c4d5e-6f78-9012-bcde-f12345678901",
+        "barcode": "00000002",
+        "sku": "BTG-ANT-5-001",
+        "product_name": "Emas Batangan 5gr",
+        "weight_gram": 5
+      },
+      {
+        "stock_item_id": "3c4d5e6f-7890-1234-cdef-123456789012",
+        "barcode": "00000003",
+        "sku": "BTG-ANT-5-002",
+        "product_name": "Emas Batangan 5gr",
+        "weight_gram": 5
+      }
+    ],
+    "not_scanned_by_weight": [
+      { "weight_gram": 5, "count": 2, "total_weight_gram": 10 }
+    ]
   }
 }
 ```
+
+`GET /api/stock-opnames/{id}` saat sesi masih `IN_PROGRESS` membawa `not_scanned_items`/
+`not_scanned_by_weight` yang sama persis (dihitung ulang dari query yang sama tiap kali di-fetch,
+bukan snapshot dari scan terakhir).
 
 Contoh response error:
 ```json
@@ -2380,6 +2416,11 @@ Dua lapis test:
   ada scan sama sekali → `not_scanned=3`; abis scan 1 unit, response `scan` itu sendiri langsung
   bawa `not_scanned=2` (tanpa fetch ulang), `GET /{id}` sesudahnya setuju; abis `complete` →
   `not_scanned=0` dan `missing=2` (2 unit yang tadi belum discan)
+- `not_scanned_items`/`not_scanned_by_weight` dikelompokkan per gramasi: 2 produk beda berat (5gr
+  x2 unit, 10gr x1 unit) → `GET /{id}` sebelum scan → 3 `not_scanned_items` (tiap unit bawa
+  sku/product_name/weight_gram), 2 grup berat (`{weight:5,count:2,total:10}`,
+  `{weight:10,count:1,total:10}`); scan 1 unit 5gr → response `scan` itu sendiri langsung
+  menunjukkan grup 5gr turun ke `count:1` (tanpa fetch ulang); abis `complete` → keduanya kosong
 
 **`expense_categories_test.go`** — `/api/expense-categories` (BE-1201)
 - Semua endpoint tanpa token → 401; role KASIR → 403
