@@ -340,8 +340,8 @@ func TestStockItems_ListFiltersStatusAndCondition(t *testing.T) {
 	}
 	var byCondition stockItemListDTO
 	decodeData(t, resp, &byCondition)
-	if len(byCondition.Items) != 2 {
-		t.Fatalf("condition=GOOD: expected 2 items, got %d", len(byCondition.Items))
+	if len(byCondition.Items) != 1 || byCondition.Items[0].ID != good.ID {
+		t.Fatalf("condition=GOOD: expected only default-visible AVAILABLE item %q, got %+v", good.ID, byCondition.Items)
 	}
 
 	status, resp = doRequest(t, http.MethodGet, "/api/products/"+product.ID+"/stock-items?status=AVAILABLE", nil, adminToken)
@@ -358,16 +358,16 @@ func TestStockItems_ListFiltersStatusAndCondition(t *testing.T) {
 			t.Fatal("SOLD item must not appear in status=AVAILABLE filter")
 		}
 	}
-	_ = good
 }
 
 // TestStockItems_ListHidesDeadStatusesByDefaultButShowsOnExplicitFilter covers
-// both "dead" statuses a unit can end up in outside the normal AVAILABLE/SOLD
-// lifecycle: ARCHIVED (admin removed it) and VOID (its originating BUY was
-// cancelled). Neither is real usable stock, so both are hidden from the
-// default (no ?status=) list — matching how every other resource hides its
-// inactive rows by default — but each stays reachable via an explicit
-// ?status= filter for audit purposes.
+// every status a unit can end up in outside the plain, currently-sellable
+// AVAILABLE state: SOLD (already sold to a customer/supplier), ARCHIVED
+// (admin removed it), and VOID (its originating BUY was cancelled). None of
+// them is real usable stock, so all three are hidden from the default (no
+// ?status=) list — client requirement: the default stock list should only
+// reflect stock that's actually still available — but each stays reachable
+// via an explicit ?status= filter for audit purposes.
 func TestStockItems_ListHidesDeadStatusesByDefaultButShowsOnExplicitFilter(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
@@ -378,6 +378,9 @@ func TestStockItems_ListHidesDeadStatusesByDefaultButShowsOnExplicitFilter(t *te
 	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
 
 	kept := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "SN-KEEP"}))
+
+	sold := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "SN-SOLD-HIDE"}))
+	markStockItemSold(t, sold.ID)
 
 	archived := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(map[string]any{"serial_number": "SN-ARC"}))
 	status, resp := doRequest(t, http.MethodDelete, "/api/stock-items/"+archived.ID, nil, superAdminToken)
@@ -406,7 +409,17 @@ func TestStockItems_ListHidesDeadStatusesByDefaultButShowsOnExplicitFilter(t *te
 	var unfiltered stockItemListDTO
 	decodeData(t, resp, &unfiltered)
 	if len(unfiltered.Items) != 1 || unfiltered.Items[0].ID != kept.ID {
-		t.Fatalf("expected default list to hide ARCHIVED and VOID units and only show %q, got %+v", kept.ID, unfiltered.Items)
+		t.Fatalf("expected default list to hide SOLD, ARCHIVED, and VOID units and only show %q, got %+v", kept.ID, unfiltered.Items)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/products/"+product.ID+"/stock-items?status=SOLD", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("list status=SOLD: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var bySold stockItemListDTO
+	decodeData(t, resp, &bySold)
+	if len(bySold.Items) != 1 || bySold.Items[0].ID != sold.ID {
+		t.Fatalf("expected explicit status=SOLD filter to return %q, got %+v", sold.ID, bySold.Items)
 	}
 
 	status, resp = doRequest(t, http.MethodGet, "/api/products/"+product.ID+"/stock-items?status=ARCHIVED", nil, adminToken)

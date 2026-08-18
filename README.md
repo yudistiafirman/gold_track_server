@@ -770,10 +770,10 @@ DELETE /api/stock-items/{id}                   # arsipkan (status -> ARCHIVED), 
   Postgres nolak di level FK (`transaction_items`/`stock_opname_items` FK ke `stock_items.id`
   tanpa `ON DELETE CASCADE`). Karena sekarang `UPDATE` bukan `DELETE`, baris itu tidak pernah
   hilang, jadi FK itu tidak pernah kena — kasus-kasus itu sekarang **berhasil** diarsipkan (200).
-- **`GET .../stock-items` (list per produk) sembunyikan unit `ARCHIVED` maupun `VOID` secara
-  default** — tanpa `?status=`, list tetap nampilin histori penuh (`AVAILABLE` + `SOLD`, sama
-  seperti sebelumnya) tapi bukan dua status "mati" itu, konsisten sama pola resource lain yang
-  nyembunyiin baris `is_active=false` dari list default. `VOID` (unit hasil `BUY` yang
+- **`GET .../stock-items` (list per produk) cuma nampilin unit `AVAILABLE` secara default** —
+  tanpa `?status=`, `SOLD`, `VOID`, maupun `ARCHIVED` semuanya disembunyikan (client requirement:
+  daftar stock cuma buat stok yang beneran masih ada/bisa dijual), konsisten sama pola resource
+  lain yang nyembunyiin baris `is_active=false` dari list default. `VOID` (unit hasil `BUY` yang
   transaksinya di-cancel) **tidak bisa** ditransisi jadi `ARCHIVED` — tetap status tersendiri
   biar alasan "kenapa unit ini mati" (buyback-nya batal, bukan sengaja diarsipkan admin) tidak
   hilang; `DELETE` ke unit `VOID` ditolak 409. Eksplisit `?status=ARCHIVED` atau `?status=VOID`
@@ -2244,9 +2244,9 @@ Dua lapis test:
 - List: filter `?status=`/`?condition=` menyempitkan hasil dengan benar (unit `SOLD` di-set
   langsung lewat SQL di test — belum ada endpoint "mark as sold"); `?search=` cocok ke
   `serial_number`; `?limit=&page=` paginasi dengan benar
-- List: tanpa `?status=`, unit `ARCHIVED` maupun `VOID` (hasil `BUY` yang di-cancel) **tidak** ikut
-  muncul (beda dari `SOLD` yang tetap muncul di list default); eksplisit `?status=ARCHIVED` atau
-  `?status=VOID` tetap bisa narik masing-masing
+- List: tanpa `?status=`, cuma unit `AVAILABLE` yang muncul — `SOLD`, `ARCHIVED`, maupun `VOID`
+  (hasil `BUY` yang di-cancel) semuanya **tidak** ikut muncul; eksplisit `?status=SOLD`,
+  `?status=ARCHIVED`, atau `?status=VOID` tetap bisa narik masing-masing
 - Detail: response mengandung `barcode` lengkap; id bukan UUID → 400; tidak ditemukan → 404
 - `PUT` (ADMIN & SUPER_ADMIN): mengubah `serial_number`/`condition`/`purchase_price`/
   `purchase_date`/`notes`, tapi **`barcode` dan `product.id` tetap sama** — inti acceptance

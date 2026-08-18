@@ -215,14 +215,11 @@ func (r *stockItemRepository) ListByProduct(ctx context.Context, productID int64
 		args = append(args, *filter.Status)
 		conditions = append(conditions, fmt.Sprintf("si.status = $%d", len(args)))
 	} else {
-		// No explicit status filter — show full history (AVAILABLE, SOLD)
-		// but hide the two "dead" statuses: ARCHIVED (admin removed it) and
-		// VOID (its originating BUY was cancelled, so it was never
-		// legitimately in stock). Both stay reachable via an explicit
-		// ?status=, same as how archived/inactive rows are hidden from
-		// every other resource's default list but still directly
-		// queryable.
-		conditions = append(conditions, "si.status NOT IN ('ARCHIVED', 'VOID')")
+		// No explicit status filter — client wants the default list to
+		// reflect only real, sellable stock, so only AVAILABLE shows.
+		// SOLD, VOID, and ARCHIVED are all "dead" for this view and stay
+		// reachable via an explicit ?status=.
+		conditions = append(conditions, "si.status = 'AVAILABLE'")
 	}
 	if filter.Condition != nil {
 		args = append(args, *filter.Condition)
