@@ -32,6 +32,16 @@ var allowedStockStatuses = map[string]struct{}{
 	"VOID":      {},
 }
 
+// StockItemSoldTo is who bought a SOLD unit — nil for a unit that's never
+// been (currently) sold. Only one of Customer/Supplier applies, captured by
+// Type rather than two separate nilable fields, mirroring which side of
+// SELL/SELL_SUPPLIER actually sold this unit.
+type StockItemSoldTo struct {
+	Type     string // CUSTOMER | SUPPLIER
+	PublicID string
+	Name     string
+}
+
 // StockItemSummary is the public-facing view of a stock item: only
 // PublicID (UUID) ever leaves this layer, the internal bigint PK stays in
 // model.StockItem/the repository.
@@ -47,6 +57,7 @@ type StockItemSummary struct {
 	ProductionYear *int   // optional
 	Status         string
 	SoldAt         *time.Time
+	SoldTo         *StockItemSoldTo
 	Notes          string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
@@ -501,5 +512,25 @@ func toStockItemSummary(s *model.StockItem, product ProductRef, weightGram float
 }
 
 func toStockItemSummaryFromRefs(s *repository.StockItemWithRefs) StockItemSummary {
-	return toStockItemSummary(&s.StockItem, ProductRef{PublicID: s.ProductPublicID, Name: s.ProductName}, s.ProductWeight)
+	summary := toStockItemSummary(&s.StockItem, ProductRef{PublicID: s.ProductPublicID, Name: s.ProductName}, s.ProductWeight)
+	summary.SoldTo = toStockItemSoldTo(s)
+	return summary
+}
+
+// toStockItemSoldTo maps the repository's raw SELL/SELL_SUPPLIER join into
+// the CUSTOMER/SUPPLIER-tagged public shape — nil unless every joined
+// column came back non-NULL (a SOLD unit with a currently-COMPLETED sale).
+func toStockItemSoldTo(s *repository.StockItemWithRefs) *StockItemSoldTo {
+	if s.SoldToType == nil || s.SoldToPublicID == nil || s.SoldToName == nil {
+		return nil
+	}
+	soldToType := "CUSTOMER"
+	if *s.SoldToType == "SELL_SUPPLIER" {
+		soldToType = "SUPPLIER"
+	}
+	return &StockItemSoldTo{
+		Type:     soldToType,
+		PublicID: *s.SoldToPublicID,
+		Name:     *s.SoldToName,
+	}
 }

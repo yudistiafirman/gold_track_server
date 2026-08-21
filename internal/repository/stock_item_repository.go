@@ -52,13 +52,19 @@ func nextStockItemBarcode(ctx context.Context, tx pgx.Tx) (string, error) {
 
 // StockItemWithRefs is a stock item joined with its product's identity —
 // list/detail/label views need the product name/weight, not just the
-// internal FK, without a second round trip per row.
+// internal FK, without a second round trip per row. SoldTo* is who bought a
+// SOLD unit (nil for AVAILABLE/VOID/ARCHIVED, or a SOLD unit whose sale
+// somehow isn't COMPLETED — shouldn't happen but the join degrades to NULL
+// rather than erroring) — see stockItemWithRefsFrom for how it's resolved.
 type StockItemWithRefs struct {
 	model.StockItem
 	ProductPublicID string
 	ProductName     string
 	ProductSKU      string
 	ProductWeight   float64
+	SoldToType      *string // SELL | SELL_SUPPLIER, mirrors transactions.type
+	SoldToPublicID  *string
+	SoldToName      *string
 }
 
 type StockItemFilter struct {
@@ -74,12 +80,26 @@ const stockItemWithRefsColumns = `
 	si.id, si.public_id::text, si.product_id, si.barcode, si.serial_number, si.condition,
 	si.purchase_price::float8, si.purchase_date, si.production_year, si.supplier_id, si.po_id, si.status, si.sold_at,
 	si.notes, si.created_by, si.created_at, si.updated_at,
-	p.public_id::text, p.name, p.sku, p.weight_gram::float8
+	p.public_id::text, p.name, p.sku, p.weight_gram::float8,
+	st.type, COALESCE(stc.public_id::text, sts.public_id::text), COALESCE(stc.name, sts.name)
 `
 
+// stockItemWithRefsFrom's sold-to join resolves who bought a SOLD unit: at
+// most one transaction_items row can reference a given stock_item through a
+// still-COMPLETED SELL/SELL_SUPPLIER transaction at any one time (reselling
+// a unit requires it to go back to AVAILABLE first, which only happens by
+// cancelling — see transaction_repository.go's Cancel — so an older sale of
+// the same unit, if any, is CANCELLED and excluded here), so the LEFT JOIN
+// can't multiply rows. idx_transaction_items_stock_item_id (migration
+// 000034) backs sti's half of the join since every stock-item read now
+// carries it.
 const stockItemWithRefsFrom = `
 	FROM stock_items si
 	JOIN products p ON p.id = si.product_id
+	LEFT JOIN transaction_items sti ON sti.stock_item_id = si.id
+	LEFT JOIN transactions st ON st.id = sti.transaction_id AND st.status = 'COMPLETED' AND st.type IN ('SELL', 'SELL_SUPPLIER')
+	LEFT JOIN customers stc ON stc.id = st.customer_id
+	LEFT JOIN suppliers sts ON sts.id = st.supplier_id
 `
 
 type StockItemRepository interface {
@@ -186,6 +206,7 @@ func scanStockItemWithRefs(row pgx.Row, s *StockItemWithRefs) error {
 		&s.PurchasePrice, &s.PurchaseDate, &s.ProductionYear, &s.SupplierID, &s.POID, &s.Status, &s.SoldAt,
 		&s.Notes, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
 		&s.ProductPublicID, &s.ProductName, &s.ProductSKU, &s.ProductWeight,
+		&s.SoldToType, &s.SoldToPublicID, &s.SoldToName,
 	)
 }
 

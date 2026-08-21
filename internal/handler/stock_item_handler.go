@@ -32,6 +32,14 @@ type stockItemProductResponse struct {
 	WeightGram float64 `json:"weight_gram"`
 }
 
+// stockItemSoldToResponse is the counterparty who bought a SOLD unit —
+// omitted entirely (nil) for units that aren't currently sold.
+type stockItemSoldToResponse struct {
+	Type string `json:"type"` // CUSTOMER | SUPPLIER
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 // stockItemResponse.ID is the public_id (UUID) — the internal bigint PK is
 // never serialized to JSON. purchase_date is a plain "2006-01-02" string
 // (the column is a DATE, not a TIMESTAMPTZ).
@@ -46,12 +54,21 @@ type stockItemResponse struct {
 	ProductionYear *int                     `json:"production_year"`
 	Status         string                   `json:"status"`
 	SoldAt         *time.Time               `json:"sold_at"`
+	SoldTo         *stockItemSoldToResponse `json:"sold_to,omitempty"`
 	Notes          string                   `json:"notes"`
 	CreatedAt      time.Time                `json:"created_at"`
 	UpdatedAt      time.Time                `json:"updated_at"`
 }
 
 func toStockItemResponse(s service.StockItemSummary) stockItemResponse {
+	var soldTo *stockItemSoldToResponse
+	if s.SoldTo != nil {
+		soldTo = &stockItemSoldToResponse{
+			Type: s.SoldTo.Type,
+			ID:   s.SoldTo.PublicID,
+			Name: s.SoldTo.Name,
+		}
+	}
 	return stockItemResponse{
 		ID: s.PublicID,
 		Product: stockItemProductResponse{
@@ -67,6 +84,7 @@ func toStockItemResponse(s service.StockItemSummary) stockItemResponse {
 		ProductionYear: s.ProductionYear,
 		Status:         s.Status,
 		SoldAt:         s.SoldAt,
+		SoldTo:         soldTo,
 		Notes:          s.Notes,
 		CreatedAt:      s.CreatedAt,
 		UpdatedAt:      s.UpdatedAt,

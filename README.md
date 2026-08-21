@@ -827,6 +827,19 @@ DELETE /api/stock-items/{id}                   # arsipkan (status -> ARCHIVED), 
   satu produk. Default (tanpa `?status=`) sama kayak endpoint per-produk: cuma `AVAILABLE` yang
   tampil, `SOLD`/`VOID`/`ARCHIVED` disembunyikan kecuali diminta eksplisit lewat `?status=`.
   Urutan juga sama, `ORDER BY si.id DESC` (unit terbaru duluan).
+- **`sold_to` (di setiap response stock item — create/get/list/lookup)** — siapa yang beli unit
+  itu, `{"type": "CUSTOMER"|"SUPPLIER", "id", "name"}`, cuma muncul (field-nya `omitempty`) kalau
+  unitnya lagi `SOLD` lewat transaksi `SELL`/`SELL_SUPPLIER` yang masih `COMPLETED` — `null`/absen
+  buat unit `AVAILABLE`, `VOID`, `ARCHIVED`, atau `SOLD` yang transaksinya sendiri sudah
+  `CANCELLED` (nggak mungkin secara status, tapi kalau ada race, join-nya aman degradasi ke NULL,
+  nggak pernah salah nunjuk penjualan lama). `type` di-map dari `transactions.type`: `SELL` →
+  `CUSTOMER`, `SELL_SUPPLIER` → `SUPPLIER`. Resolusinya lewat `LEFT JOIN` ke
+  `transaction_items`/`transactions`/`customers`/`suppliers` (`stock_item_repository.go`), aman
+  dari duplikasi baris karena cuma boleh ada satu transaksi `SELL`/`SELL_SUPPLIER` yang masih
+  `COMPLETED` per unit di satu waktu (jual ulang unit yang sama wajib lewat cancel dulu, balik ke
+  `AVAILABLE`, baru bisa dijual lagi) — index baru `idx_transaction_items_stock_item_id` (migrasi
+  `000034`) nemenin join ini karena sekarang kepakai di **setiap** pembacaan stock item, bukan cuma
+  yang butuh.
 
 #### GET /api/stock-items/lookup — cari unit via barcode (BE-701/BE-703)
 

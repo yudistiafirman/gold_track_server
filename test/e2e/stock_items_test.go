@@ -14,6 +14,12 @@ type stockItemProductDTO struct {
 	WeightGram float64 `json:"weight_gram"`
 }
 
+type stockItemSoldToDTO struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 type stockItemDTO struct {
 	ID             string              `json:"id"`
 	Product        stockItemProductDTO `json:"product"`
@@ -25,6 +31,7 @@ type stockItemDTO struct {
 	ProductionYear *int                `json:"production_year"`
 	Status         string              `json:"status"`
 	SoldAt         *time.Time          `json:"sold_at"`
+	SoldTo         *stockItemSoldToDTO `json:"sold_to"`
 	Notes          string              `json:"notes"`
 }
 
@@ -625,6 +632,132 @@ func TestStockItems_ListAllProductNotFound(t *testing.T) {
 	status, resp := doRequest(t, http.MethodGet, "/api/stock-items?product_id="+nonexistentUUID, nil, adminToken)
 	if status != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d (resp=%+v)", status, resp)
+	}
+}
+
+// --- sold_to: who bought a SOLD unit ---
+
+func TestStockItems_SoldToNilForAvailableUnit(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	item := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items/"+item.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockItemDTO
+	decodeData(t, resp, &fetched)
+	if fetched.SoldTo != nil {
+		t.Fatalf("expected sold_to nil for an AVAILABLE unit, got %+v", fetched.SoldTo)
+	}
+}
+
+func TestStockItems_SoldToPopulatedForSellToCustomer(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	item := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": item.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create sale: expected 201, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+item.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockItemDTO
+	decodeData(t, resp, &fetched)
+	if fetched.SoldTo == nil || fetched.SoldTo.Type != "CUSTOMER" || fetched.SoldTo.Name != "Budi Santoso" || fetched.SoldTo.ID != customer.ID {
+		t.Fatalf("expected sold_to CUSTOMER Budi Santoso (%s), got %+v", customer.ID, fetched.SoldTo)
+	}
+
+	// Also confirm it surfaces through the global sold-items list, not just Get.
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items?status=SOLD", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("list status=SOLD: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var list stockItemListDTO
+	decodeData(t, resp, &list)
+	if len(list.Items) != 1 || list.Items[0].SoldTo == nil || list.Items[0].SoldTo.Name != "Budi Santoso" {
+		t.Fatalf("expected sold list to include sold_to, got %+v", list.Items)
+	}
+}
+
+func TestStockItems_SoldToPopulatedForSellSupplier(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	item := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	supplier := createSupplier(t, adminToken, map[string]any{"name": "Toko Emas Jaya"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", map[string]any{
+		"type":           "SELL_SUPPLIER",
+		"supplier_id":    supplier.ID,
+		"payment_method": "CASH",
+		"items":          []map[string]any{{"stock_item_id": item.ID, "price_total": 100000}},
+	}, adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create sell_supplier: expected 201, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+item.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockItemDTO
+	decodeData(t, resp, &fetched)
+	if fetched.SoldTo == nil || fetched.SoldTo.Type != "SUPPLIER" || fetched.SoldTo.Name != "Toko Emas Jaya" || fetched.SoldTo.ID != supplier.ID {
+		t.Fatalf("expected sold_to SUPPLIER Toko Emas Jaya (%s), got %+v", supplier.ID, fetched.SoldTo)
+	}
+}
+
+// TestStockItems_SoldToClearedAfterCancel confirms sold_to isn't a frozen
+// snapshot — cancelling the sale reverts the unit to AVAILABLE and the join
+// (scoped to COMPLETED transactions) stops matching, same as sold_at
+// semantics elsewhere but for this new field.
+func TestStockItems_SoldToClearedAfterCancel(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	item := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": item.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create sale: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+
+	status, resp = doRequest(t, http.MethodPost, "/api/transactions/"+tx.ID+"/cancel", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("cancel: expected 200, got %d (resp=%+v)", status, resp)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items/"+item.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var fetched stockItemDTO
+	decodeData(t, resp, &fetched)
+	if fetched.Status != "AVAILABLE" {
+		t.Fatalf("expected status AVAILABLE after cancel, got %q", fetched.Status)
+	}
+	if fetched.SoldTo != nil {
+		t.Fatalf("expected sold_to nil after the sale was cancelled, got %+v", fetched.SoldTo)
 	}
 }
 

@@ -1,0 +1,1 @@
+DROP INDEX idx_transaction_items_stock_item_id;
