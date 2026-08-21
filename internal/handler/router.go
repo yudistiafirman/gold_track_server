@@ -64,6 +64,7 @@ func NewRouter(
 			r.Get("/products", productHandler.List)
 			r.Get("/products/{id}", productHandler.Get)
 			r.Get("/products/{productId}/stock-items", stockItemHandler.ListByProduct)
+			r.Get("/stock-items", stockItemHandler.List)
 			r.Get("/stock-items/lookup", stockItemHandler.Lookup)
 			r.Get("/stock-items/{id}", stockItemHandler.Get)
 			r.Get("/stock-items/{id}/label", stockItemHandler.GetLabel)

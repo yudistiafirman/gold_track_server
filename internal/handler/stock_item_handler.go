@@ -176,6 +176,44 @@ func (h *StockItemHandler) ListByProduct(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// List returns stock items across every product (unlike ListByProduct,
+// which is always scoped to one) — backs global browsing views like a
+// "Barang Terjual" page (?status=SOLD). ?product_id= optionally narrows to
+// one product, same as ListByProduct's path param would.
+func (h *StockItemHandler) List(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+
+	result, err := h.stockItemService.ListAll(r.Context(), service.ListAllStockItemsInput{
+		ProductPublicID: q.Get("product_id"),
+		Status:          q.Get("status"),
+		Condition:       q.Get("condition"),
+		Search:          q.Get("search"),
+		Page:            page,
+		Limit:           limit,
+	})
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	items := make([]stockItemResponse, 0, len(result.Items))
+	for _, s := range result.Items {
+		items = append(items, toStockItemResponse(s))
+	}
+
+	response.JSON(w, http.StatusOK, stockItemListResponse{
+		Items: items,
+		Pagination: paginationResponse{
+			Page:       result.Page,
+			Limit:      result.Limit,
+			Total:      result.Total,
+			TotalPages: result.TotalPages,
+		},
+	})
+}
+
 // Lookup finds a stock item by its physical barcode (BE-701), for adding to
 // a sale cart. ?type= is optional (BE-703) — when it's "SELL", a BAD
 // condition unit sets requires_confirmation so the client can prompt

@@ -62,6 +62,7 @@ type StockItemWithRefs struct {
 }
 
 type StockItemFilter struct {
+	ProductID *int64  // nil = across every product (List); always set by ListByProduct
 	Status    *string // AVAILABLE | SOLD | VOID | ARCHIVED, nil = no filter (still excludes VOID/ARCHIVED by default)
 	Condition *string // GOOD | BAD, nil = no filter
 	Search    string  // ILIKE on serial_number
@@ -98,8 +99,15 @@ type StockItemRepository interface {
 	// FindByPublicID but keyed by the physical barcode instead of public_id.
 	FindByBarcode(ctx context.Context, barcode string) (*StockItemWithRefs, error)
 	// ListByProduct returns stock items for a single product matching filter,
-	// along with the total count ignoring pagination.
+	// along with the total count ignoring pagination. Thin wrapper over List
+	// with filter.ProductID pinned to productID.
 	ListByProduct(ctx context.Context, productID int64, filter StockItemFilter) ([]StockItemWithRefs, int, error)
+	// List returns stock items across every product matching filter (or
+	// scoped to filter.ProductID, if set), along with the total count
+	// ignoring pagination — backs the global "Barang Terjual"-style views
+	// that ListByProduct can't serve since it's always scoped to one
+	// product.
+	List(ctx context.Context, filter StockItemFilter) ([]StockItemWithRefs, int, error)
 	// Update applies serial_number/condition/purchase_price/purchase_date/
 	// production_year/notes and bumps updated_at — barcode and product_id are deliberately never in
 	// the SET clause, so they cannot change regardless of what else is edited.
@@ -208,9 +216,18 @@ func (r *stockItemRepository) FindByBarcode(ctx context.Context, barcode string)
 }
 
 func (r *stockItemRepository) ListByProduct(ctx context.Context, productID int64, filter StockItemFilter) ([]StockItemWithRefs, int, error) {
-	conditions := []string{"si.product_id = $1"}
-	args := []any{productID}
+	filter.ProductID = &productID
+	return r.List(ctx, filter)
+}
 
+func (r *stockItemRepository) List(ctx context.Context, filter StockItemFilter) ([]StockItemWithRefs, int, error) {
+	var conditions []string
+	var args []any
+
+	if filter.ProductID != nil {
+		args = append(args, *filter.ProductID)
+		conditions = append(conditions, fmt.Sprintf("si.product_id = $%d", len(args)))
+	}
 	if filter.Status != nil {
 		args = append(args, *filter.Status)
 		conditions = append(conditions, fmt.Sprintf("si.status = $%d", len(args)))
@@ -229,7 +246,10 @@ func (r *stockItemRepository) ListByProduct(ctx context.Context, productID int64
 		args = append(args, "%"+filter.Search+"%")
 		conditions = append(conditions, fmt.Sprintf("si.serial_number ILIKE $%d", len(args)))
 	}
-	where := "WHERE " + strings.Join(conditions, " AND ")
+	where := ""
+	if len(conditions) > 0 {
+		where = "WHERE " + strings.Join(conditions, " AND ")
+	}
 
 	var total int
 	countQuery := `SELECT COUNT(*) FROM stock_items si ` + where

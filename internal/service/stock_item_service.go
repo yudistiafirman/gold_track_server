@@ -92,6 +92,19 @@ type ListStockItemsInput struct {
 	Limit           int
 }
 
+// ListAllStockItemsInput backs List, the global (not product-scoped) stock
+// item listing — ProductPublicID is optional here (unlike
+// ListStockItemsInput.ProductPublicID, always required by ListByProduct's
+// caller): "" means every product.
+type ListAllStockItemsInput struct {
+	ProductPublicID string
+	Status          string
+	Condition       string
+	Search          string
+	Page            int
+	Limit           int
+}
+
 type StockItemListResult struct {
 	Items      []StockItemSummary
 	Page       int
@@ -103,6 +116,10 @@ type StockItemListResult struct {
 type StockItemService interface {
 	Create(ctx context.Context, input CreateStockItemInput) (StockItemSummary, error)
 	List(ctx context.Context, input ListStockItemsInput) (StockItemListResult, error)
+	// ListAll is List's global counterpart — not scoped to one product,
+	// backs pages that browse stock across the whole catalog (e.g. a
+	// "Barang Terjual" sold-items view via ?status=SOLD).
+	ListAll(ctx context.Context, input ListAllStockItemsInput) (StockItemListResult, error)
 	Get(ctx context.Context, publicID string) (StockItemSummary, error)
 	GetLabel(ctx context.Context, publicID string) (StockItemLabel, error)
 	Update(ctx context.Context, input UpdateStockItemInput) (StockItemSummary, error)
@@ -229,6 +246,71 @@ func (s *stockItemService) List(ctx context.Context, input ListStockItemsInput) 
 	}
 
 	items, total, err := s.stockItemRepo.ListByProduct(ctx, product.ID, filter)
+	if err != nil {
+		return StockItemListResult{}, apperror.Internal("failed to list stock items", err)
+	}
+
+	summaries := make([]StockItemSummary, 0, len(items))
+	for i := range items {
+		summaries = append(summaries, toStockItemSummaryFromRefs(&items[i]))
+	}
+
+	return StockItemListResult{
+		Items:      summaries,
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: int(math.Ceil(float64(total) / float64(limit))),
+	}, nil
+}
+
+func (s *stockItemService) ListAll(ctx context.Context, input ListAllStockItemsInput) (StockItemListResult, error) {
+	page := input.Page
+	if page <= 0 {
+		page = defaultStockItemPage
+	}
+	limit := input.Limit
+	if limit <= 0 {
+		limit = defaultStockItemLimit
+	}
+	if limit > maxStockItemLimit {
+		limit = maxStockItemLimit
+	}
+
+	filter := repository.StockItemFilter{
+		Search: strings.TrimSpace(input.Search),
+		Page:   page,
+		Limit:  limit,
+	}
+
+	if input.ProductPublicID != "" {
+		product, err := s.productRepo.FindByPublicID(ctx, input.ProductPublicID)
+		if err != nil {
+			if errors.Is(err, repository.ErrProductNotFound) {
+				return StockItemListResult{}, apperror.NotFound("produk tidak ditemukan", nil)
+			}
+			return StockItemListResult{}, apperror.Internal("failed to fetch product", err)
+		}
+		filter.ProductID = &product.ID
+	}
+
+	if input.Status != "" {
+		if _, ok := allowedStockStatuses[input.Status]; !ok {
+			return StockItemListResult{}, apperror.BadRequest("status harus AVAILABLE, SOLD, VOID, atau ARCHIVED", nil)
+		}
+		status := input.Status
+		filter.Status = &status
+	}
+
+	if input.Condition != "" {
+		if _, ok := allowedConditions[input.Condition]; !ok {
+			return StockItemListResult{}, apperror.BadRequest("condition harus GOOD atau BAD", nil)
+		}
+		condition := input.Condition
+		filter.Condition = &condition
+	}
+
+	items, total, err := s.stockItemRepo.List(ctx, filter)
 	if err != nil {
 		return StockItemListResult{}, apperror.Internal("failed to list stock items", err)
 	}

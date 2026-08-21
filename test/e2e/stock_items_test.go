@@ -494,6 +494,140 @@ func TestStockItems_ListPagination(t *testing.T) {
 	}
 }
 
+// --- global list (not scoped to one product): GET /api/stock-items ---
+
+func TestStockItems_ListAllRequiresAuth(t *testing.T) {
+	resetDB(t)
+
+	status, _ := doRequest(t, http.MethodGet, "/api/stock-items", nil, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", status)
+	}
+}
+
+func TestStockItems_ListAllKasirCanAccess(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	kasir := seedUser(t, "KASIR", true)
+	kasirToken := login(t, kasir.Email, kasir.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items", nil, kasirToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+}
+
+// TestStockItems_ListAllSpansMultipleProducts is what ListByProduct can
+// never do — it's always scoped to one product's path param. This is the
+// endpoint's actual reason to exist: a global browsing view across the
+// whole catalog.
+func TestStockItems_ListAllSpansMultipleProducts(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	productA := stockItemFixtureProduct(t, adminToken)
+	category := createCategory(t, adminToken, "Perhiasan")
+	brand := createBrand(t, adminToken, "UBS")
+	productB := createProduct(t, adminToken, "Cincin Emas 5gr", category.ID, brand.ID, 5)
+
+	itemA := createStockItemAPI(t, adminToken, productA.ID, validStockItemBody(map[string]any{"serial_number": "SN-A"}))
+	itemB := createStockItemAPI(t, adminToken, productB.ID, validStockItemBody(map[string]any{"serial_number": "SN-B"}))
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var list stockItemListDTO
+	decodeData(t, resp, &list)
+	if len(list.Items) != 2 {
+		t.Fatalf("expected 2 items spanning both products, got %+v", list.Items)
+	}
+	ids := map[string]bool{list.Items[0].ID: true, list.Items[1].ID: true}
+	if !ids[itemA.ID] || !ids[itemB.ID] {
+		t.Fatalf("expected items from both products, got %+v", list.Items)
+	}
+}
+
+// TestStockItems_ListAllStatusSoldSpansProducts covers the actual client
+// request behind this endpoint: a "Barang Terjual" view listing every SOLD
+// unit across the whole catalog, not just one product at a time.
+func TestStockItems_ListAllStatusSoldSpansProducts(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	productA := stockItemFixtureProduct(t, adminToken)
+	category := createCategory(t, adminToken, "Perhiasan")
+	brand := createBrand(t, adminToken, "UBS")
+	productB := createProduct(t, adminToken, "Cincin Emas 5gr", category.ID, brand.ID, 5)
+
+	availableA := createStockItemAPI(t, adminToken, productA.ID, validStockItemBody(map[string]any{"serial_number": "SN-AVAIL-A"}))
+	soldA := createStockItemAPI(t, adminToken, productA.ID, validStockItemBody(map[string]any{"serial_number": "SN-SOLD-A"}))
+	markStockItemSold(t, soldA.ID)
+	soldB := createStockItemAPI(t, adminToken, productB.ID, validStockItemBody(map[string]any{"serial_number": "SN-SOLD-B"}))
+	markStockItemSold(t, soldB.ID)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("default list: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var unfiltered stockItemListDTO
+	decodeData(t, resp, &unfiltered)
+	if len(unfiltered.Items) != 1 || unfiltered.Items[0].ID != availableA.ID {
+		t.Fatalf("expected default list to hide SOLD units across every product, got %+v", unfiltered.Items)
+	}
+
+	status, resp = doRequest(t, http.MethodGet, "/api/stock-items?status=SOLD", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("status=SOLD: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var sold stockItemListDTO
+	decodeData(t, resp, &sold)
+	if len(sold.Items) != 2 {
+		t.Fatalf("expected 2 SOLD items spanning both products, got %+v", sold.Items)
+	}
+	ids := map[string]bool{sold.Items[0].ID: true, sold.Items[1].ID: true}
+	if !ids[soldA.ID] || !ids[soldB.ID] {
+		t.Fatalf("expected both sold units from different products, got %+v", sold.Items)
+	}
+}
+
+func TestStockItems_ListAllFiltersByProductID(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	productA := stockItemFixtureProduct(t, adminToken)
+	category := createCategory(t, adminToken, "Perhiasan")
+	brand := createBrand(t, adminToken, "UBS")
+	productB := createProduct(t, adminToken, "Cincin Emas 5gr", category.ID, brand.ID, 5)
+
+	itemA := createStockItemAPI(t, adminToken, productA.ID, validStockItemBody(map[string]any{"serial_number": "SN-PF-A"}))
+	createStockItemAPI(t, adminToken, productB.ID, validStockItemBody(map[string]any{"serial_number": "SN-PF-B"}))
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items?product_id="+productA.ID, nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var list stockItemListDTO
+	decodeData(t, resp, &list)
+	if len(list.Items) != 1 || list.Items[0].ID != itemA.ID {
+		t.Fatalf("expected only productA's item, got %+v", list.Items)
+	}
+}
+
+func TestStockItems_ListAllProductNotFound(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+
+	status, resp := doRequest(t, http.MethodGet, "/api/stock-items?product_id="+nonexistentUUID, nil, adminToken)
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (resp=%+v)", status, resp)
+	}
+}
+
 func TestStockItems_GetReturnsFullDetailWithBarcode(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)

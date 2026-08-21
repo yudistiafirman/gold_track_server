@@ -727,6 +727,7 @@ Contoh response (200):
 ```bash
 POST   /api/products/{productId}/stock-items   # tambah unit stok, barcode auto-generate      -> 201 (ADMIN & SUPER_ADMIN)
 GET    /api/products/{productId}/stock-items   # ?status=&condition=&search=&page=&limit=     -> 200 (semua role, token valid)
+GET    /api/stock-items                        # ?product_id=&status=&condition=&search=&page=&limit= -> 200 (semua role, token valid)
 GET    /api/stock-items/lookup                 # ?barcode=&type=  cari unit buat keranjang jual -> 200 / 404 / 409 (semua role, token valid)
 GET    /api/stock-items/{id}                   # detail unit lengkap (termasuk barcode)         -> 200 / 404 (semua role, token valid)
 GET    /api/stock-items/{id}/label             # data buat cetak label CODE128                  -> 200 / 404 (semua role, token valid)
@@ -817,6 +818,15 @@ DELETE /api/stock-items/{id}                   # arsipkan (status -> ARCHIVED), 
   dalam objek `product` (bukan top-level), karena berat itu atribut produk (semua unit dari
   produk yang sama beratnya pasti sama), pakai DTO terpisah dari `productRefResponse` yang
   dipakai category/brand/supplier di tempat lain (yang tidak punya berat).
+- **`GET /api/stock-items` (list global, lintas produk)** — sama persis shape response &
+  filter (`status`/`condition`/`search`/`page`/`limit`) dengan `GET
+  .../products/{productId}/stock-items`, cuma tanpa scope produk wajib; `?product_id=` opsional
+  buat sempitin ke satu produk kalau perlu (setara `{productId}` path param di endpoint
+  per-produk). Dibikin buat kebutuhan halaman browsing lintas katalog kayak "Barang Terjual"
+  (`?status=SOLD`) — endpoint per-produk nggak bisa dipakai buat itu karena wajib di-scope ke
+  satu produk. Default (tanpa `?status=`) sama kayak endpoint per-produk: cuma `AVAILABLE` yang
+  tampil, `SOLD`/`VOID`/`ARCHIVED` disembunyikan kecuali diminta eksplisit lewat `?status=`.
+  Urutan juga sama, `ORDER BY si.id DESC` (unit terbaru duluan).
 
 #### GET /api/stock-items/lookup — cari unit via barcode (BE-701/BE-703)
 
