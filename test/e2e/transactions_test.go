@@ -20,6 +20,11 @@ type transactionItemDTO struct {
 	WeightGram   float64 `json:"weight_gram"`
 	PricePerGram float64 `json:"price_per_gram"`
 	PriceTotal   float64 `json:"price_total"`
+	// CostPrice/Profit are only ever populated on the receipt endpoint's
+	// response, for ADMIN/SUPER_ADMIN callers on SELL/SELL_SUPPLIER items
+	// — see receipts_test.go.
+	CostPrice *float64 `json:"cost_price"`
+	Profit    *float64 `json:"profit"`
 }
 
 type transactionSummaryDTO struct {

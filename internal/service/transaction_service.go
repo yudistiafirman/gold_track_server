@@ -37,9 +37,10 @@ var allowedPaymentMethods = map[string]struct{}{
 const allowedPaymentMethodsMessage = "payment_method harus salah satu dari CASH, TRANSFER, QRIS, DEBIT, KREDIT, GOPAY, OVO, DANA, SHOPEEPAY"
 
 // TransactionItemSummary is the public-facing view of one unit within a
-// transaction (sold or bought) — cogs (the unit's wholesale cost) is
-// deliberately not part of this DTO, it stays internal to avoid leaking
-// margin data to a cashier-facing response.
+// transaction (sold or bought). COGS is only populated by GetReceipt (nil
+// for BUY items, which have no cogs, and nil from Get/List, which never
+// read it) — the handler decides whether to expose it in the response,
+// gated to ADMIN/SUPER_ADMIN to avoid leaking margin data to KASIR.
 type TransactionItemSummary struct {
 	PublicID          string
 	StockItemPublicID string
@@ -49,6 +50,7 @@ type TransactionItemSummary struct {
 	WeightGram        float64
 	PricePerGram      float64
 	PriceTotal        float64
+	COGS              *float64
 }
 
 type TransactionSummary struct {
@@ -772,6 +774,7 @@ func (s *transactionService) GetReceipt(ctx context.Context, publicID string) (R
 			WeightGram:        it.WeightGram,
 			PricePerGram:      it.PricePerGram,
 			PriceTotal:        it.PriceTotal,
+			COGS:              it.COGS,
 		})
 	}
 

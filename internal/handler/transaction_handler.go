@@ -362,15 +362,40 @@ type receiptStoreResponse struct {
 	Phone   string `json:"phone"`
 }
 
-type receiptResponse struct {
-	transactionResponse
-	Customer   *receiptPartyResponse `json:"customer,omitempty"`
-	Supplier   *receiptPartyResponse `json:"supplier,omitempty"`
-	Store      receiptStoreResponse  `json:"store"`
-	InvoiceURL string                `json:"invoice_url"`
+// receiptItemResponse extends transactionItemResponse with margin data —
+// cost_price/profit are only ever set by toReceiptResponse when showMargin
+// is true (caller is ADMIN/SUPER_ADMIN) and the item has a cogs (SELL/
+// SELL_SUPPLIER only — BUY items have none), omitted from the JSON
+// otherwise so KASIR receipts stay margin-free like other cashier-facing
+// responses.
+type receiptItemResponse struct {
+	transactionItemResponse
+	CostPrice *float64 `json:"cost_price,omitempty"`
+	Profit    *float64 `json:"profit,omitempty"`
 }
 
-func toReceiptResponse(r service.ReceiptSummary) receiptResponse {
+type receiptResponse struct {
+	ID              string                `json:"id"`
+	TransactionCode string                `json:"transaction_code"`
+	Type            string                `json:"type"`
+	TotalAmount     float64               `json:"total_amount"`
+	TotalWeight     float64               `json:"total_weight"`
+	PaymentMethod   string                `json:"payment_method"`
+	PaymentRef      string                `json:"payment_ref"`
+	Status          string                `json:"status"`
+	Items           []receiptItemResponse `json:"items"`
+	CreatedAt       time.Time             `json:"created_at"`
+	CompletedAt     *time.Time            `json:"completed_at"`
+	Customer        *receiptPartyResponse `json:"customer,omitempty"`
+	Supplier        *receiptPartyResponse `json:"supplier,omitempty"`
+	Store           receiptStoreResponse  `json:"store"`
+	InvoiceURL      string                `json:"invoice_url"`
+	TotalProfit     *float64              `json:"total_profit,omitempty"`
+}
+
+// toReceiptResponse builds the receipt payload. showMargin gates cost_price/
+// profit/total_profit to ADMIN/SUPER_ADMIN callers — see GetReceipt.
+func toReceiptResponse(r service.ReceiptSummary, showMargin bool) receiptResponse {
 	var customer *receiptPartyResponse
 	if r.Customer != nil {
 		customer = &receiptPartyResponse{Name: r.Customer.Name, Phone: r.Customer.Phone, Address: r.Customer.Address}
@@ -380,10 +405,47 @@ func toReceiptResponse(r service.ReceiptSummary) receiptResponse {
 		supplier = &receiptPartyResponse{Name: r.Supplier.Name, Phone: r.Supplier.Phone, Address: r.Supplier.Address}
 	}
 
-	return receiptResponse{
-		transactionResponse: toTransactionResponse(r.TransactionSummary),
-		Customer:            customer,
-		Supplier:            supplier,
+	items := make([]receiptItemResponse, 0, len(r.Items))
+	var totalProfit float64
+	hasProfit := false
+	for _, it := range r.Items {
+		item := receiptItemResponse{
+			transactionItemResponse: transactionItemResponse{
+				ID:           it.PublicID,
+				StockItemID:  it.StockItemPublicID,
+				Barcode:      it.Barcode,
+				SerialNumber: it.SerialNumber,
+				ProductName:  it.ProductName,
+				WeightGram:   it.WeightGram,
+				PricePerGram: it.PricePerGram,
+				PriceTotal:   it.PriceTotal,
+			},
+		}
+		if showMargin && it.COGS != nil {
+			cogs := *it.COGS
+			profit := it.PriceTotal - cogs
+			item.CostPrice = &cogs
+			item.Profit = &profit
+			totalProfit += profit
+			hasProfit = true
+		}
+		items = append(items, item)
+	}
+
+	resp := receiptResponse{
+		ID:              r.PublicID,
+		TransactionCode: r.TransactionCode,
+		Type:            r.Type,
+		TotalAmount:     r.TotalAmount,
+		TotalWeight:     r.TotalWeight,
+		PaymentMethod:   r.PaymentMethod,
+		PaymentRef:      r.PaymentRef,
+		Status:          r.Status,
+		Items:           items,
+		CreatedAt:       r.CreatedAt,
+		CompletedAt:     r.CompletedAt,
+		Customer:        customer,
+		Supplier:        supplier,
 		Store: receiptStoreResponse{
 			Name:    r.Store.Name,
 			Address: r.Store.Address,
@@ -391,12 +453,18 @@ func toReceiptResponse(r service.ReceiptSummary) receiptResponse {
 		},
 		InvoiceURL: r.InvoiceURL,
 	}
+	if hasProfit {
+		resp.TotalProfit = &totalProfit
+	}
+	return resp
 }
 
 // GetReceipt returns a transaction's struk payload (BE-1001) — snapshotted
 // items plus counterparty/store display data, for all types (SELL, BUY,
 // SELL_SUPPLIER). Rendering (dot matrix/continuous form) and printing are
 // entirely the FE print-agent's responsibility; this only returns data.
+// cost_price/profit/total_profit are additionally included for ADMIN/
+// SUPER_ADMIN callers (margin data hidden from KASIR).
 func (h *TransactionHandler) GetReceipt(w http.ResponseWriter, r *http.Request) {
 	id, err := publicIDParam(r)
 	if err != nil {
@@ -410,5 +478,10 @@ func (h *TransactionHandler) GetReceipt(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	response.JSON(w, http.StatusOK, toReceiptResponse(result))
+	showMargin := false
+	if claims, ok := appmw.ClaimsFromContext(r.Context()); ok {
+		showMargin = claims.Role == "ADMIN" || claims.Role == "SUPER_ADMIN"
+	}
+
+	response.JSON(w, http.StatusOK, toReceiptResponse(result, showMargin))
 }

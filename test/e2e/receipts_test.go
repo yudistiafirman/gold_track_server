@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -21,10 +22,11 @@ type receiptStoreDTO struct {
 
 type receiptDTO struct {
 	transactionDTO
-	Customer   *receiptPartyDTO `json:"customer"`
-	Supplier   *receiptPartyDTO `json:"supplier"`
-	Store      receiptStoreDTO  `json:"store"`
-	InvoiceURL string           `json:"invoice_url"`
+	Customer    *receiptPartyDTO `json:"customer"`
+	Supplier    *receiptPartyDTO `json:"supplier"`
+	Store       receiptStoreDTO  `json:"store"`
+	InvoiceURL  string           `json:"invoice_url"`
+	TotalProfit *float64         `json:"total_profit"`
 }
 
 // seedShopSettings inserts shop_name/shop_address/shop_phone directly via
@@ -276,5 +278,109 @@ func TestReceipts_InvalidIDFormat(t *testing.T) {
 	status, resp := doRequest(t, http.MethodGet, "/api/transactions/1/receipt", nil, adminToken)
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (resp=%+v)", status, resp)
+	}
+}
+
+func TestReceipts_ShowsMarginForAdmin(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil)) // purchase_price=1000000
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create sale: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+
+	status, resp = doRequest(t, http.MethodGet, "/api/transactions/"+tx.ID+"/receipt", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get receipt: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var receipt receiptDTO
+	decodeData(t, resp, &receipt)
+
+	if len(receipt.Items) != 1 {
+		t.Fatalf("expected 1 item, got %+v", receipt.Items)
+	}
+	item := receipt.Items[0]
+	if item.CostPrice == nil || *item.CostPrice != 1000000 {
+		t.Fatalf("expected cost_price=1000000, got %+v", item.CostPrice)
+	}
+	if item.Profit == nil || *item.Profit != 500000 {
+		t.Fatalf("expected profit=500000, got %+v", item.Profit)
+	}
+	if receipt.TotalProfit == nil || *receipt.TotalProfit != 500000 {
+		t.Fatalf("expected total_profit=500000, got %+v", receipt.TotalProfit)
+	}
+}
+
+// TestReceipts_HidesMarginForKasir confirms cost_price/profit/total_profit
+// stay out of the receipt response entirely for KASIR — same convention as
+// checkout responses never leaking cogs (transactionItemResponse).
+func TestReceipts_HidesMarginForKasir(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	kasir := seedUser(t, "KASIR", true)
+	kasirToken := login(t, kasir.Email, kasir.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	stockItem := createStockItemAPI(t, adminToken, product.ID, validStockItemBody(nil))
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", sellTransactionBody(customer.ID, []map[string]any{
+		{"stock_item_id": stockItem.ID, "price_total": 1500000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create sale: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+
+	status, resp = doRequest(t, http.MethodGet, "/api/transactions/"+tx.ID+"/receipt", nil, kasirToken)
+	if status != http.StatusOK {
+		t.Fatalf("get receipt: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	lower := strings.ToLower(string(resp.Data))
+	if strings.Contains(lower, "cost_price") || strings.Contains(lower, "profit") {
+		t.Fatalf("kasir receipt must not include margin data, got raw data: %s", resp.Data)
+	}
+}
+
+// TestReceipts_NoProfitForBuy confirms margin fields never appear on a BUY
+// receipt (no cogs exists for a buyback — the shop is acquiring stock, not
+// selling it) even when requested by ADMIN.
+func TestReceipts_NoProfitForBuy(t *testing.T) {
+	resetDB(t)
+	admin := seedUser(t, "ADMIN", true)
+	adminToken := login(t, admin.Email, admin.Password)
+	product := stockItemFixtureProduct(t, adminToken)
+	customer := createCustomer(t, adminToken, map[string]any{"name": "Budi Santoso"})
+
+	status, resp := doRequest(t, http.MethodPost, "/api/transactions", buyTransactionBody(customer.ID, []map[string]any{
+		{"product_id": product.ID, "serial_number": "RCPT-BUY-PROFIT", "condition": "GOOD", "price_total": 900000},
+	}), adminToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create buy: expected 201, got %d (resp=%+v)", status, resp)
+	}
+	var tx transactionDTO
+	decodeData(t, resp, &tx)
+
+	status, resp = doRequest(t, http.MethodGet, "/api/transactions/"+tx.ID+"/receipt", nil, adminToken)
+	if status != http.StatusOK {
+		t.Fatalf("get receipt: expected 200, got %d (resp=%+v)", status, resp)
+	}
+	var receipt receiptDTO
+	decodeData(t, resp, &receipt)
+	if receipt.TotalProfit != nil {
+		t.Fatalf("expected no total_profit for BUY, got %v", *receipt.TotalProfit)
+	}
+	if len(receipt.Items) != 1 || receipt.Items[0].CostPrice != nil || receipt.Items[0].Profit != nil {
+		t.Fatalf("expected no cost_price/profit on BUY item, got %+v", receipt.Items)
 	}
 }
