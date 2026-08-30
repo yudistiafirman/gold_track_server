@@ -319,3 +319,55 @@ func (h *ReportHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		CashSummary:                toCashSummaryResponse(result.Cash),
 	})
 }
+
+// reconciliationResponse answers "does today's live saldo match the profit
+// booked since the last daily closing?". When HasBaseline is false (no
+// closing recorded yet), only the Actual* fields are meaningful — the rest
+// are zero-valued and the FE should show "belum pernah tutup buku" instead
+// of a bogus comparison.
+type reconciliationResponse struct {
+	HasBaseline          bool    `json:"has_baseline"`
+	LastClosingDate      string  `json:"last_closing_date,omitempty"`
+	PeriodFrom           string  `json:"period_from,omitempty"`
+	PeriodTo             string  `json:"period_to,omitempty"`
+	LastClosingSaldo     float64 `json:"last_closing_saldo,omitempty"`
+	PeriodRevenue        float64 `json:"period_revenue,omitempty"`
+	PeriodCOGS           float64 `json:"period_cogs,omitempty"`
+	PeriodExpenses       float64 `json:"period_expenses,omitempty"`
+	PeriodNetProfit      float64 `json:"period_net_profit,omitempty"`
+	ActualTotalBalance   float64 `json:"actual_total_balance"`
+	ActualTotalGoldValue float64 `json:"actual_total_gold_value"`
+	ActualSaldo          float64 `json:"actual_saldo"`
+	ExpectedSaldo        float64 `json:"expected_saldo,omitempty"`
+	Difference           float64 `json:"difference,omitempty"`
+	InSync               bool    `json:"in_sync"`
+}
+
+// Reconciliation checks whether today's live saldo (cash + gold stock value)
+// matches the profit booked since the last time an admin closed the books —
+// the same day-to-day check the client does manually in their Excel.
+func (h *ReportHandler) Reconciliation(w http.ResponseWriter, r *http.Request) {
+	result, err := h.reportService.Reconciliation(r.Context())
+	if err != nil {
+		response.Error(w, err)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, reconciliationResponse{
+		HasBaseline:          result.HasBaseline,
+		LastClosingDate:      result.LastClosingDate,
+		PeriodFrom:           result.PeriodFrom,
+		PeriodTo:             result.PeriodTo,
+		LastClosingSaldo:     result.LastClosingSaldo,
+		PeriodRevenue:        result.PeriodRevenue,
+		PeriodCOGS:           result.PeriodCOGS,
+		PeriodExpenses:       result.PeriodExpenses,
+		PeriodNetProfit:      result.PeriodNetProfit,
+		ActualTotalBalance:   result.ActualTotalBalance,
+		ActualTotalGoldValue: result.ActualTotalGoldValue,
+		ActualSaldo:          result.ActualSaldo,
+		ExpectedSaldo:        result.ExpectedSaldo,
+		Difference:           result.Difference,
+		InSync:               result.InSync,
+	})
+}

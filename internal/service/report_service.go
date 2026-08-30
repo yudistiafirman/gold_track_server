@@ -2,12 +2,19 @@ package service
 
 import (
 	"context"
+	"math"
 	"strings"
 	"time"
 
 	"gold-track-be/internal/repository"
 	"gold-track-be/pkg/apperror"
 )
+
+// reconciliationSyncEpsilon guards the InSync comparison against float64
+// summation noise — money figures here are effectively integer-cents-scale
+// values well within float64's exact range, so this is far tighter than any
+// real discrepancy would ever be.
+const reconciliationSyncEpsilon = 0.01
 
 const reportDateLayout = "2006-01-02"
 
@@ -132,20 +139,45 @@ type DashboardSummary struct {
 	Cash                       CashSummary
 }
 
+// ReconciliationSummary answers "does today's live saldo match the profit
+// booked since the last time an admin closed the books?" — the same check
+// the client's manual Excel does day-to-day (kenaikan saldo harus = laba).
+// HasBaseline is false when no daily_closings row exists yet (nothing to
+// compare against) — every other field is zero-valued in that case.
+type ReconciliationSummary struct {
+	HasBaseline          bool
+	LastClosingDate      string
+	PeriodFrom           string
+	PeriodTo             string
+	LastClosingSaldo     float64
+	PeriodRevenue        float64
+	PeriodCOGS           float64
+	PeriodExpenses       float64
+	PeriodNetProfit      float64
+	ActualTotalBalance   float64
+	ActualTotalGoldValue float64
+	ActualSaldo          float64
+	ExpectedSaldo        float64
+	Difference           float64 // ActualSaldo - ExpectedSaldo; 0 when in sync
+	InSync               bool
+}
+
 type ReportService interface {
 	TransactionReport(ctx context.Context, input TransactionReportInput) (TransactionReportSummary, error)
 	StockReport(ctx context.Context, threshold int) (StockReportSummary, error)
 	FinanceReport(ctx context.Context, input FinanceReportInput) (FinanceReportSummary, error)
 	Dashboard(ctx context.Context, input DashboardInput) (DashboardSummary, error)
 	CashSummary(ctx context.Context) (CashSummary, error)
+	Reconciliation(ctx context.Context) (ReconciliationSummary, error)
 }
 
 type reportService struct {
-	reportRepo repository.ReportRepository
+	reportRepo       repository.ReportRepository
+	dailyClosingRepo repository.DailyClosingRepository
 }
 
-func NewReportService(reportRepo repository.ReportRepository) ReportService {
-	return &reportService{reportRepo: reportRepo}
+func NewReportService(reportRepo repository.ReportRepository, dailyClosingRepo repository.DailyClosingRepository) ReportService {
+	return &reportService{reportRepo: reportRepo, dailyClosingRepo: dailyClosingRepo}
 }
 
 func (s *reportService) TransactionReport(ctx context.Context, input TransactionReportInput) (TransactionReportSummary, error) {
@@ -350,6 +382,65 @@ func (s *reportService) CashSummary(ctx context.Context) (CashSummary, error) {
 		TotalBalance:       totals.TotalBalance,
 		TotalExternalFunds: totals.TotalExternalFunds,
 		TotalExternalDebts: totals.TotalExternalDebts,
+	}, nil
+}
+
+// Reconciliation compares today's live saldo (total_balance + total_gold_value)
+// against the saldo expected from the last time the books were closed plus
+// the profit booked since then. lastClosing is always searched strictly
+// before today, so it's unaffected by a closing made today, and it happily
+// spans gaps of several un-closed days (same as the client's Excel, which
+// has missing day-sheets) by accumulating profit over the whole gap.
+func (s *reportService) Reconciliation(ctx context.Context) (ReconciliationSummary, error) {
+	cash, err := s.CashSummary(ctx)
+	if err != nil {
+		return ReconciliationSummary{}, err
+	}
+	actualSaldo := cash.TotalBalance + cash.TotalGoldValue
+
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
+	lastClosing, err := s.dailyClosingRepo.FindLatestBefore(ctx, today)
+	if err != nil {
+		return ReconciliationSummary{}, apperror.Internal("failed to fetch last daily closing", err)
+	}
+	if lastClosing == nil {
+		return ReconciliationSummary{
+			ActualTotalBalance:   cash.TotalBalance,
+			ActualTotalGoldValue: cash.TotalGoldValue,
+			ActualSaldo:          actualSaldo,
+		}, nil
+	}
+
+	fromDate := lastClosing.ClosingDate.AddDate(0, 0, 1)
+	finance, err := s.FinanceReport(ctx, FinanceReportInput{
+		DateFrom: fromDate.Format(reportDateLayout),
+		DateTo:   today.Format(reportDateLayout),
+	})
+	if err != nil {
+		return ReconciliationSummary{}, err
+	}
+
+	expectedSaldo := lastClosing.TotalSaldo + finance.NetProfit
+	difference := actualSaldo - expectedSaldo
+
+	return ReconciliationSummary{
+		HasBaseline:          true,
+		LastClosingDate:      lastClosing.ClosingDate.Format(reportDateLayout),
+		PeriodFrom:           fromDate.Format(reportDateLayout),
+		PeriodTo:             today.Format(reportDateLayout),
+		LastClosingSaldo:     lastClosing.TotalSaldo,
+		PeriodRevenue:        finance.TotalRevenue,
+		PeriodCOGS:           finance.TotalCOGS,
+		PeriodExpenses:       finance.TotalExpenses,
+		PeriodNetProfit:      finance.NetProfit,
+		ActualTotalBalance:   cash.TotalBalance,
+		ActualTotalGoldValue: cash.TotalGoldValue,
+		ActualSaldo:          actualSaldo,
+		ExpectedSaldo:        expectedSaldo,
+		Difference:           difference,
+		InSync:               math.Abs(difference) < reconciliationSyncEpsilon,
 	}, nil
 }
 

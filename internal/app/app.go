@@ -98,9 +98,14 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	expenseService := service.NewExpenseService(expenseRepo, expenseCategoryRepo, userRepo)
 	expenseHandler := handler.NewExpenseHandler(expenseService)
 
+	dailyClosingRepo := repository.NewDailyClosingRepository(dbPool)
+
 	reportRepo := repository.NewReportRepository(dbPool)
-	reportService := service.NewReportService(reportRepo)
+	reportService := service.NewReportService(reportRepo, dailyClosingRepo)
 	reportHandler := handler.NewReportHandler(reportService)
+
+	dailyClosingService := service.NewDailyClosingService(dailyClosingRepo, reportRepo, userRepo)
+	dailyClosingHandler := handler.NewDailyClosingHandler(dailyClosingService)
 
 	goldPriceRepo := repository.NewGoldPriceRepository(dbPool)
 	goldPriceService := service.NewGoldPriceService(goldPriceRepo)
@@ -118,7 +123,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	externalDebtService := service.NewExternalDebtService(externalDebtRepo)
 	externalDebtHandler := handler.NewExternalDebtHandler(externalDebtService)
 
-	router := handler.NewRouter(log, cfg.CORS, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler, transactionHandler, purchaseOrderHandler, stockOpnameHandler, expenseCategoryHandler, expenseHandler, reportHandler, settingsHandler, goldPriceHandler, balanceAccountHandler, externalFundHandler, externalDebtHandler)
+	router := handler.NewRouter(log, cfg.CORS, healthHandler, authHandler, authService, userHandler, categoryHandler, brandHandler, productHandler, supplierHandler, stockItemHandler, customerHandler, transactionHandler, purchaseOrderHandler, stockOpnameHandler, expenseCategoryHandler, expenseHandler, reportHandler, settingsHandler, goldPriceHandler, balanceAccountHandler, externalFundHandler, externalDebtHandler, dailyClosingHandler)
 
 	return &App{Pool: dbPool, Router: router, GoldPriceService: goldPriceService, TokenBlacklistRepo: tokenBlacklistRepo}, nil
 }

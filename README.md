@@ -1840,9 +1840,10 @@ GET /api/reports/transactions   # ?from=&to=&type=                          -> 2
 GET /api/reports/stock          # ?threshold=                                -> 200
 GET /api/reports/finance        # ?from=&to=                                 -> 200
 GET /api/reports/dashboard      # ?from=&to=&threshold=&pending_limit=       -> 200
+GET /api/reports/reconciliation                                              -> 200
 ```
 
-Empat endpoint read-only, tanpa pagination (hasil agregat yang jumlahnya sudah kebatasi — beberapa
+Lima endpoint read-only, tanpa pagination (hasil agregat yang jumlahnya sudah kebatasi — beberapa
 baris per tipe, satu baris per produk aktif, beberapa angka — bukan listing per baris).
 
 **`GET /api/reports/transactions`** — rekap `transaction_count`/`total_amount`/`total_weight`
@@ -1914,6 +1915,33 @@ kalau salah satu/keduanya diisi, dipakai persis seperti apa adanya (sama seperti
   - `total_balance` — jumlah seluruh `balance_accounts.balance` (Total Saldo, termasuk entri "Cash").
   - `total_external_funds` — jumlah seluruh `external_funds.amount`.
   - `total_external_debts` — jumlah seluruh `external_debts.amount`.
+
+**`GET /api/reports/reconciliation`** — jawaban ke pertanyaan client: *"pendapatan dan pengeluaran
+hari ini sinkron nggak sama hasil akhir kemarin?"* — cek yang selama ini mereka lakukan manual di
+Excel (satu sheet per hari, baris "Total Saldo" dibanding sheet hari sebelumnya). Tanpa query
+param — selalu "saldo hidup sekarang" dibanding penutupan terakhir (lihat `/api/daily-closings` di
+bawah buat cara nyimpen penutupan itu).
+
+- `has_baseline` — `false` kalau belum pernah ada `/api/daily-closings` yang tercatat sama sekali;
+  di kondisi ini cuma `actual_total_balance`/`actual_total_gold_value`/`actual_saldo`/`in_sync`
+  yang keisi (semua yang lain `0`/kosong) — FE seharusnya tampilkan "belum pernah tutup buku",
+  bukan hasil bandingan palsu.
+- Kalau `has_baseline = true`: `last_closing_date` adalah tanggal penutupan **terakhir sebelum
+  hari ini** (dicari `closing_date < hari ini`, jadi tidak kepengaruh sama sekali walau hari ini
+  sendiri sudah ditutup) — bisa beberapa hari lalu kalau ada hari yang lewat tanpa ditutup (persis
+  seperti sheet yang bolong di Excel client). `period_from`/`period_to` adalah rentang dari sehari
+  setelah `last_closing_date` sampai hari ini — laba (`period_net_profit`, dari `FinanceReport`
+  internal yang sama dengan `/api/reports/finance`) diakumulasi dari seluruh rentang itu, bukan
+  cuma hari ini, supaya hari yang kelewat tetap ikut kehitung.
+- `expected_saldo = last_closing_saldo + period_net_profit` — prediksi saldo hari ini kalau semua
+  transaksi/pengeluaran di periode itu benar-benar ke-record sebagai perubahan
+  `total_balance`/`total_gold_value`. `actual_saldo = total_balance + total_gold_value` saat ini
+  (persis rumus "Saldo" di Excel client — **tidak** termasuk `total_external_funds`/
+  `total_external_debts`, karena dua itu manual juga dan cuma nambah noise).
+- `difference = actual_saldo - expected_saldo`. `in_sync = true` kalau `difference` mendekati nol
+  (toleransi kecil buat noise pembulatan float, bukan buat selisih pembukuan beneran). Selisih
+  yang nyata paling sering artinya ada uang masuk/keluar (mis. hasil penjualan) yang belum
+  di-`PUT` ke `balance_accounts` — persis simptom yang client laporkan.
 
 Contoh response `GET /api/reports/transactions` (200):
 ```json
@@ -1990,6 +2018,91 @@ Contoh response `GET /api/reports/dashboard` (200):
     }
   }
 }
+```
+
+Contoh response `GET /api/reports/reconciliation` (200, ada penutupan kemarin):
+```json
+{
+  "success": true,
+  "data": {
+    "has_baseline": true,
+    "last_closing_date": "2026-08-30",
+    "period_from": "2026-08-31",
+    "period_to": "2026-08-31",
+    "last_closing_saldo": 158500000,
+    "period_revenue": 1500000,
+    "period_cogs": 1000000,
+    "period_expenses": 0,
+    "period_net_profit": 500000,
+    "actual_total_balance": 8500000,
+    "actual_total_gold_value": 149000000,
+    "actual_saldo": 157500000,
+    "expected_saldo": 159000000,
+    "difference": -1500000,
+    "in_sync": false
+  }
+}
+```
+Contoh di atas: ada penjualan hari ini (`period_revenue`/`period_cogs`/`period_net_profit` keisi)
+tapi hasil jualannya belum di-`PUT` ke `balance_accounts` — makanya `actual_saldo` lebih kecil
+`1500000` dari `expected_saldo`, dan `in_sync=false`.
+
+Contoh response `GET /api/reports/reconciliation` (200, belum pernah tutup buku):
+```json
+{
+  "success": true,
+  "data": {
+    "has_baseline": false,
+    "actual_total_balance": 8500000,
+    "actual_total_gold_value": 149000000,
+    "actual_saldo": 157500000,
+    "in_sync": false
+  }
+}
+```
+
+### /api/daily-closings — penutupan saldo harian (SUPER_ADMIN only)
+
+```bash
+GET  /api/daily-closings           # ?page=&limit=                          -> 200
+POST /api/daily-closings                                                    -> 201 / 409
+GET  /api/daily-closings/{id}                                               -> 200 / 404
+```
+
+Fitur "tutup buku hari ini" — snapshot cash_summary saat ini (`total_balance` + `total_gold_value`)
+disimpan permanen sebagai `daily_closings`, jadi baseline buat
+`GET /api/reports/reconciliation` besok (lihat penjelasan di atas). Mirip cara owner toko ngisi
+satu sheet Excel per hari: aksinya manual, dipicu admin di akhir hari kerja — **tidak** ada cron
+otomatis yang nutup hari sendiri.
+
+`POST` tanpa body — selalu menutup **hari ini** (tanggal UTC, konsisten dengan seluruh perhitungan
+tanggal lain di `/api/reports`), snapshot diambil dari cash_summary yang sama persis dengan yang
+dipakai `/api/reports/dashboard`. Menutup hari yang sama dua kali membalas `409` (`closing_date`
+unique per hari). Tidak ada `PUT`/`DELETE` — penutupan adalah catatan historis permanen (mirip
+`gold_prices`), tidak ada cerita "edit saldo yang tercatat kemarin".
+
+`GET` list dipaginasi seperti resource lain (`?page=`/`?limit=`, default 1/20, cap 100), urut
+`closing_date` terbaru duluan.
+
+Contoh response `POST /api/daily-closings` (201):
+```json
+{
+  "success": true,
+  "data": {
+    "id": "6c7d8e9f-0123-4567-89ab-cdef01234567",
+    "closing_date": "2026-08-31",
+    "total_balance": 8500000,
+    "total_gold_value": 149000000,
+    "total_saldo": 157500000,
+    "created_at": "2026-08-31T23:59:00Z"
+  }
+}
+```
+
+Contoh response error:
+```json
+// 409 — hari ini sudah pernah ditutup
+{"success":false,"error":{"code":"CONFLICT","message":"hari ini sudah ditutup"}}
 ```
 
 ### /api/settings — pengaturan toko (ADMIN & SUPER_ADMIN)

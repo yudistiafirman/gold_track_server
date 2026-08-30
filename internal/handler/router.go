@@ -43,6 +43,7 @@ func NewRouter(
 	balanceAccountHandler *BalanceAccountHandler,
 	externalFundHandler *ExternalFundHandler,
 	externalDebtHandler *ExternalDebtHandler,
+	dailyClosingHandler *DailyClosingHandler,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -173,6 +174,7 @@ func NewRouter(
 					r.Get("/stock", reportHandler.Stock)
 					r.Get("/finance", reportHandler.Finance)
 					r.Get("/dashboard", reportHandler.Dashboard)
+					r.Get("/reconciliation", reportHandler.Reconciliation)
 				})
 			})
 
@@ -201,6 +203,13 @@ func NewRouter(
 					r.Get("/{id}", externalDebtHandler.Get)
 					r.Put("/{id}", externalDebtHandler.Update)
 					r.Delete("/{id}", externalDebtHandler.Delete)
+				})
+				// No Update/Delete — a closing is an immutable historical
+				// record of what the saldo was on a past date.
+				r.Route("/daily-closings", func(r chi.Router) {
+					r.Get("/", dailyClosingHandler.List)
+					r.Post("/", dailyClosingHandler.Create)
+					r.Get("/{id}", dailyClosingHandler.Get)
 				})
 			})
 		})
