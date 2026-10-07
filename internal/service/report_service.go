@@ -90,7 +90,6 @@ type FinanceReportSummary struct {
 	GrossProfit        float64
 	GrossMarginPercent float64 // GrossProfit / TotalRevenue * 100; 0 when TotalRevenue is 0
 	TotalExpenses      float64
-	NetProfit          float64
 }
 
 const defaultDashboardPendingPOLimit = 5
@@ -153,7 +152,7 @@ type ReconciliationSummary struct {
 	PeriodRevenue        float64
 	PeriodCOGS           float64
 	PeriodExpenses       float64
-	PeriodNetProfit      float64
+	PeriodProfit         float64
 	ActualTotalBalance   float64
 	ActualTotalGoldValue float64
 	ActualSaldo          float64
@@ -294,7 +293,6 @@ func (s *reportService) FinanceReport(ctx context.Context, input FinanceReportIn
 		GrossProfit:        grossProfit,
 		GrossMarginPercent: marginPercent,
 		TotalExpenses:      totalExpenses,
-		NetProfit:          grossProfit - totalExpenses,
 	}, nil
 }
 
@@ -422,7 +420,7 @@ func (s *reportService) Reconciliation(ctx context.Context) (ReconciliationSumma
 		return ReconciliationSummary{}, err
 	}
 
-	expectedSaldo := lastClosing.TotalSaldo + finance.NetProfit
+	expectedSaldo := lastClosing.TotalSaldo + finance.GrossProfit
 	difference := actualSaldo - expectedSaldo
 
 	return ReconciliationSummary{
@@ -434,7 +432,7 @@ func (s *reportService) Reconciliation(ctx context.Context) (ReconciliationSumma
 		PeriodRevenue:        finance.TotalRevenue,
 		PeriodCOGS:           finance.TotalCOGS,
 		PeriodExpenses:       finance.TotalExpenses,
-		PeriodNetProfit:      finance.NetProfit,
+		PeriodProfit:         finance.GrossProfit,
 		ActualTotalBalance:   cash.TotalBalance,
 		ActualTotalGoldValue: cash.TotalGoldValue,
 		ActualSaldo:          actualSaldo,

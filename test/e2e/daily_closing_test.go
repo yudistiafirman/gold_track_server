@@ -29,7 +29,7 @@ type reconciliationDTO struct {
 	PeriodRevenue        float64 `json:"period_revenue"`
 	PeriodCOGS           float64 `json:"period_cogs"`
 	PeriodExpenses       float64 `json:"period_expenses"`
-	PeriodNetProfit      float64 `json:"period_net_profit"`
+	PeriodProfit         float64 `json:"period_profit"`
 	ActualTotalBalance   float64 `json:"actual_total_balance"`
 	ActualTotalGoldValue float64 `json:"actual_total_gold_value"`
 	ActualSaldo          float64 `json:"actual_saldo"`
@@ -274,8 +274,8 @@ func TestReconciliation_InSyncWhenSaleProceedsAreRecorded(t *testing.T) {
 	if !recon.HasBaseline || recon.LastClosingDate != yesterday.Format("2006-01-02") || recon.PeriodFrom != wantToday || recon.PeriodTo != wantToday {
 		t.Fatalf("expected baseline=yesterday period=today..today, got %+v", recon)
 	}
-	if recon.PeriodNetProfit != 500000 {
-		t.Fatalf("expected period_net_profit=500000 (1500000 revenue - 1000000 cogs), got %v", recon.PeriodNetProfit)
+	if recon.PeriodProfit != 500000 {
+		t.Fatalf("expected period_profit=500000 (1500000 revenue - 1000000 cogs), got %v", recon.PeriodProfit)
 	}
 	if recon.Difference != 0 || !recon.InSync {
 		t.Fatalf("expected difference=0 and in_sync=true (sale proceeds fully recorded), got %+v", recon)

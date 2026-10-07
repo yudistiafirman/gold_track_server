@@ -161,7 +161,6 @@ type financeSummaryResponse struct {
 	GrossProfit        float64                            `json:"gross_profit"`
 	GrossMarginPercent float64                            `json:"gross_margin_percent"`
 	TotalExpenses      float64                            `json:"total_expenses"`
-	NetProfit          float64                            `json:"net_profit"`
 }
 
 func toFinanceSummaryResponse(result service.FinanceReportSummary) financeSummaryResponse {
@@ -192,7 +191,6 @@ func toFinanceSummaryResponse(result service.FinanceReportSummary) financeSummar
 		GrossProfit:        result.GrossProfit,
 		GrossMarginPercent: result.GrossMarginPercent,
 		TotalExpenses:      result.TotalExpenses,
-		NetProfit:          result.NetProfit,
 	}
 }
 
@@ -334,7 +332,7 @@ type reconciliationResponse struct {
 	PeriodRevenue        float64 `json:"period_revenue,omitempty"`
 	PeriodCOGS           float64 `json:"period_cogs,omitempty"`
 	PeriodExpenses       float64 `json:"period_expenses,omitempty"`
-	PeriodNetProfit      float64 `json:"period_net_profit,omitempty"`
+	PeriodProfit         float64 `json:"period_profit,omitempty"`
 	ActualTotalBalance   float64 `json:"actual_total_balance"`
 	ActualTotalGoldValue float64 `json:"actual_total_gold_value"`
 	ActualSaldo          float64 `json:"actual_saldo"`
@@ -362,7 +360,7 @@ func (h *ReportHandler) Reconciliation(w http.ResponseWriter, r *http.Request) {
 		PeriodRevenue:        result.PeriodRevenue,
 		PeriodCOGS:           result.PeriodCOGS,
 		PeriodExpenses:       result.PeriodExpenses,
-		PeriodNetProfit:      result.PeriodNetProfit,
+		PeriodProfit:         result.PeriodProfit,
 		ActualTotalBalance:   result.ActualTotalBalance,
 		ActualTotalGoldValue: result.ActualTotalGoldValue,
 		ActualSaldo:          result.ActualSaldo,

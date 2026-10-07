@@ -468,7 +468,6 @@ type financeSummaryDTO struct {
 	GrossProfit        float64                       `json:"gross_profit"`
 	GrossMarginPercent float64                       `json:"gross_margin_percent"`
 	TotalExpenses      float64                       `json:"total_expenses"`
-	NetProfit          float64                       `json:"net_profit"`
 }
 
 type financeReportDTO struct {
@@ -640,7 +639,7 @@ func TestReports_FinanceExcludesCancelledSale(t *testing.T) {
 	}
 }
 
-func TestReports_FinanceNetProfitIncludesExpenses(t *testing.T) {
+func TestReports_FinanceExpensesDoNotReduceProfit(t *testing.T) {
 	resetDB(t)
 	admin := seedUser(t, "ADMIN", true)
 	adminToken := login(t, admin.Email, admin.Password)
@@ -668,9 +667,8 @@ func TestReports_FinanceNetProfitIncludesExpenses(t *testing.T) {
 	decodeData(t, resp, &report)
 
 	wantGrossProfit := 1500000.0 - 1000000.0
-	wantNetProfit := wantGrossProfit - 200000.0
-	if report.GrossProfit != wantGrossProfit || report.TotalExpenses != 200000 || report.NetProfit != wantNetProfit {
-		t.Fatalf("expected gross=%v expenses=200000 net=%v, got %+v", wantGrossProfit, wantNetProfit, report)
+	if report.GrossProfit != wantGrossProfit || report.TotalExpenses != 200000 {
+		t.Fatalf("expected gross=%v (expenses are a separate note, not deducted) expenses=200000, got %+v", wantGrossProfit, report)
 	}
 
 	expenseRow := expenseBreakdownByCategory(report, category.ID)
@@ -738,8 +736,8 @@ func TestReports_FinanceMarginPercentZeroWhenNoSales(t *testing.T) {
 	if report.GrossMarginPercent != 0 {
 		t.Fatalf("expected gross_margin_percent=0 (not NaN/Inf) when there's no revenue, got %v", report.GrossMarginPercent)
 	}
-	if report.TotalExpenses != 500000 || report.NetProfit != -500000 {
-		t.Fatalf("expected total_expenses=500000 net_profit=-500000, got %+v", report)
+	if report.TotalExpenses != 500000 || report.GrossProfit != 0 {
+		t.Fatalf("expected total_expenses=500000 gross_profit=0 (expenses don't reduce profit), got %+v", report)
 	}
 }
 
@@ -972,7 +970,7 @@ func TestReports_DashboardFinanceAndTransactionsMatchStandaloneReports(t *testin
 	}
 	var finance financeReportDTO
 	decodeData(t, resp, &finance)
-	if dashboard.Finance.GrossProfit != finance.GrossProfit || dashboard.Finance.TotalExpenses != finance.TotalExpenses || dashboard.Finance.NetProfit != finance.NetProfit {
+	if dashboard.Finance.GrossProfit != finance.GrossProfit || dashboard.Finance.TotalExpenses != finance.TotalExpenses {
 		t.Fatalf("expected dashboard finance to match standalone report, got dashboard=%+v standalone=%+v", dashboard.Finance, finance)
 	}
 
